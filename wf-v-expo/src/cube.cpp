@@ -1388,6 +1388,114 @@ Ray screen_to_world_ray(float screen_x, float screen_y, wf::output_t *output)
 
     return {origin, dir};
 }
+
+// Get current window Z offset based on zoom level (interpolates during animation)
+float get_window_z_offset()
+{
+    float zoom_factor = animation.cube_animation.zoom;
+    zoom_factor = std::max(0.0f, std::min(1.0f, zoom_factor));
+    // Interpolate: zoom=0 (cube view) -> 0.2, zoom=1 (normal view) -> 0.01
+    return 0.2f * (1.0f - zoom_factor) + 0.01f * zoom_factor;
+}
+
+// Helper function: raycast at window layer depth (0.2 units forward)
+HitInfo raycast_at_window_depth(const glm::vec3& ray_origin, const glm::vec3& ray_dir, wf::output_t *output)
+{
+    HitInfo hit;
+    auto cws = output->wset()->get_current_workspace();
+    auto grid = output->wset()->get_workspace_grid_size();
+    int num_cols = grid.width;
+    int num_rows = grid.height;
+
+    // Test current row with window layer offset
+    {
+        float v_offset = 0.0f;
+        for (int tx = 0; tx < num_cols; ++tx)
+        {
+            int face_i = tx;
+            auto model = calculate_model_matrix(face_i, v_offset, 1.0f, true); // true = window layer
+
+            glm::vec4 center_local(0.0f, 0.0f, 0.0f, 1.0f);
+            glm::vec4 center_world4 = model * center_local;
+            glm::vec3 center = glm::vec3(center_world4 / center_world4.w);
+
+            glm::vec4 normal_local(0.0f, 0.0f, 1.0f, 0.0f);
+            glm::vec4 normal_world4 = model * normal_local;
+            glm::vec3 normal = glm::normalize(glm::vec3(normal_world4));
+
+            float denom = glm::dot(normal, ray_dir);
+            if (std::abs(denom) < 1e-6f)
+                continue;
+
+            float t = glm::dot(center - ray_origin, normal) / denom;
+            if (t < 0.0f || t >= hit.t)
+                continue;
+
+            glm::vec3 intersection = ray_origin + t * ray_dir;
+            glm::mat4 inv_model = glm::inverse(model);
+            glm::vec4 local4 = inv_model * glm::vec4(intersection, 1.0f);
+            glm::vec3 local = glm::vec3(local4 / local4.w);
+
+            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f)
+                continue;
+
+            int abs_tx = (cws.x + tx) % num_cols;
+            int abs_ty = cws.y;
+            hit.ws = {abs_tx, abs_ty};
+            hit.t = t;
+            hit.local_uv.x = local.x + 0.5f;
+            hit.local_uv.y = local.y + 0.5f;
+            hit.row_offset = 0;
+        }
+    }
+
+    // Test other rows
+    for (int row_offset = 1; row_offset < num_rows; ++row_offset)
+    {
+        int abs_ty = (cws.y + row_offset) % num_rows;
+        float v_offset = -static_cast<float>(row_offset) * CUBE_SPACING;
+
+        for (int tx = 0; tx < num_cols; ++tx)
+        {
+            int face_i = tx;
+            auto model = calculate_model_matrix(face_i, v_offset, 1.0f, true); // true = window layer
+
+            glm::vec4 center_local(0.0f, 0.0f, 0.0f, 1.0f);
+            glm::vec4 center_world4 = model * center_local;
+            glm::vec3 center = glm::vec3(center_world4 / center_world4.w);
+
+            glm::vec4 normal_local(0.0f, 0.0f, 1.0f, 0.0f);
+            glm::vec4 normal_world4 = model * normal_local;
+            glm::vec3 normal = glm::normalize(glm::vec3(normal_world4));
+
+            float denom = glm::dot(normal, ray_dir);
+            if (std::abs(denom) < 1e-6f)
+                continue;
+
+            float t = glm::dot(center - ray_origin, normal) / denom;
+            if (t < 0.0f || t >= hit.t)
+                continue;
+
+            glm::vec3 intersection = ray_origin + t * ray_dir;
+            glm::mat4 inv_model = glm::inverse(model);
+            glm::vec4 local4 = inv_model * glm::vec4(intersection, 1.0f);
+            glm::vec3 local = glm::vec3(local4 / local4.w);
+
+            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f)
+                continue;
+
+            int abs_tx = (cws.x + tx) % num_cols;
+            hit.ws = {abs_tx, abs_ty};
+            hit.t = t;
+            hit.local_uv.x = local.x + 0.5f;
+            hit.local_uv.y = local.y + 0.5f;
+            hit.row_offset = row_offset;
+        }
+    }
+
+    return hit;
+}
+
 HitInfo raycast_to_workspace(const glm::vec3& ray_origin, const glm::vec3& ray_dir, wf::output_t *output)
 {
     HitInfo hit;
@@ -1515,7 +1623,8 @@ wayfire_toplevel_view find_window_at_cursor_on_face(wf::pointf_t virtual_cursor,
     
     auto ws_set = output->wset();
     
-    // Get all views and filter by target workspace
+    // Get all views - check ALL windows, not just those on target workspace
+    // This handles windows that span across multiple workspaces
     auto all_views = ws_set->get_views();
     LOGI("Total views: ", all_views.size());
     
@@ -1534,13 +1643,6 @@ wayfire_toplevel_view find_window_at_cursor_on_face(wf::pointf_t virtual_cursor,
             continue;
         }
         
-        // Check if view is on our target workspace
-        auto view_ws = ws_set->get_view_main_workspace(view);
-        if (view_ws != target_ws)
-        {
-            continue;
-        }
-        
         // Get view geometry
         auto geom = tview->get_geometry();
         
@@ -1550,7 +1652,8 @@ wayfire_toplevel_view find_window_at_cursor_on_face(wf::pointf_t virtual_cursor,
         if (virtual_cursor.x >= geom.x && virtual_cursor.x <= geom.x + geom.width &&
             virtual_cursor.y >= geom.y && virtual_cursor.y <= geom.y + geom.height)
         {
-            LOGI("  ✓ FOUND on target workspace!");
+            auto view_ws = ws_set->get_view_main_workspace(view);
+            LOGI("  ✓ FOUND window! Main WS: (", view_ws.x, ",", view_ws.y, "), Click WS: (", target_ws.x, ",", target_ws.y, ")");
             return tview;
         }
     }
@@ -1590,11 +1693,12 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
                 has_virtual_hit = false;
             }
             
-            HitInfo hit = raycast_to_workspace(ray.origin, ray.dir, output);
+            HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
             
             if (hit.ws.x >= 0)
             {
                 LOGI("Hit workspace (", hit.ws.x, ",", hit.ws.y, ") at UV (", hit.local_uv.x, ",", hit.local_uv.y, ")");
+                LOGI("Bbox dimensions: ", bbox.width, "x", bbox.height);
                 
                 // ============================================================
                 // UPDATE CURSOR INDICATOR - Shows where raycasting hit
@@ -1609,12 +1713,25 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
                 // ============================================================
                 
                 // Compute virtual cursor - add workspace offset to get absolute position
-                float virtual_x = (hit.ws.x + hit.local_uv.x) * static_cast<float>(bbox.width);
-                //float virtual_y = (hit.ws.y + (1.0f - hit.local_uv.y)) * static_cast<float>(bbox.height);
-                float virtual_y = (hit.ws.y + hit.local_uv.y) * static_cast<float>(bbox.height);
+                // Since we're raycasting at window depth, we need to
+                // apply perspective correction to match where windows are actually positioned
+                float window_offset = get_window_z_offset();
+                float perspective_scale = plane_z / (plane_z + window_offset);
+                
+                // Scale UV from center
+                float centered_uv_x = hit.local_uv.x - 0.5f;
+                float centered_uv_y = hit.local_uv.y - 0.5f;
+                float corrected_uv_x = (centered_uv_x * perspective_scale) + 0.5f;
+                float corrected_uv_y = (centered_uv_y * perspective_scale) + 0.5f;
+                
+                float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
+                float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);
                 wf::pointf_t virtual_cursor{virtual_x, virtual_y};
                 
                 LOGI("Virtual cursor (with WS offset): (", virtual_x, ",", virtual_y, ")");
+                LOGI("Hit UV: (", hit.local_uv.x, ",", hit.local_uv.y, ")");
+                LOGI("Corrected UV: (", corrected_uv_x, ",", corrected_uv_y, ")");
+                LOGI("Window offset: ", window_offset, ", Perspective scale: ", perspective_scale);
                 LOGI("Cursor indicator updated at workspace (", hit.ws.x, ",", hit.ws.y, ")");
                 
                 // Find window using virtual cursor
@@ -2519,10 +2636,18 @@ glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scal
         additional_z = 1e-3;
     }
     
+   // Interpolate window Z offset based on zoom level
+   // When zoomed out (cube view, zoom < 1): offset = 0.2
+   // When zoomed in (normal view, zoom = 1): offset = 0.01
    double window_z_offset = 0.0;
     if (is_window_layer)
     {
-        window_z_offset = 0.2;  // Move 20% closer to camera
+        float zoom_factor = animation.cube_animation.zoom;
+        // Clamp zoom to 0-1 range for interpolation
+        zoom_factor = std::max(0.0f, std::min(1.0f, zoom_factor));
+        
+        // Interpolate: zoom=0 -> 0.2, zoom=1 -> 0.01
+        window_z_offset = 0.2 * (1.0 - zoom_factor) + 0.01 * zoom_factor;
     }
     
     auto translation = glm::translate(glm::mat4(1.0),
@@ -2948,15 +3073,24 @@ void pointer_moved(wlr_pointer_motion_event *ev)
     {
         // Get the actual mouse cursor position and convert to 3D ray
         Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
-        HitInfo hit = raycast_to_workspace(ray.origin, ray.dir, output);
+        // Use window layer depth for accurate window dragging
+        HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
         
         if (hit.ws.x >= 0)
         {
             // Compute virtual cursor position - add workspace offset to get absolute position
             auto bbox = output->get_layout_geometry();
             
-            float virtual_x = (hit.ws.x + hit.local_uv.x) * static_cast<float>(bbox.width);
-            float virtual_y = (hit.ws.y + (1.0f - hit.local_uv.y)) * static_cast<float>(bbox.height);
+            // Apply perspective correction since we're at window depth
+            float window_offset = get_window_z_offset();
+            float perspective_scale = plane_z / (plane_z + window_offset);
+            float centered_uv_x = hit.local_uv.x - 0.5f;
+            float centered_uv_y = hit.local_uv.y - 0.5f;
+            float corrected_uv_x = (centered_uv_x * perspective_scale) + 0.5f;
+            float corrected_uv_y = (centered_uv_y * perspective_scale) + 0.5f;
+            
+            float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
+            float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);
             
             // Position the window so that the drag_offset point stays under the cursor
             wf::geometry_t new_geom = dragged_view->get_geometry();
