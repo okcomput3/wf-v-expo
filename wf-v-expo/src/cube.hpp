@@ -20,6 +20,7 @@ class cube_animation_t : public duration_t
     timed_transition_t rotation{*this};
     timed_transition_t zoom{*this};
     timed_transition_t ease_deformation{*this};
+    timed_transition_t max_tilt{*this};
 };
 
 struct wf_cube_animation_attribs

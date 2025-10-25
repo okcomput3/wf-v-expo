@@ -1227,6 +1227,9 @@ private:
         animation.cube_animation.rotation.set(0, 0);
         animation.cube_animation.zoom.set(1, 1);
         animation.cube_animation.ease_deformation.set(0, 0);
+        animation.cube_animation.max_tilt.set(0, 0);  // Start with no tilt
+
+        LOGI("########## CONSTRUCTOR: max_tilt initialized to 0° ##########");
 
         animation.cube_animation.start();
         
@@ -2325,6 +2328,11 @@ void render_shader_background(const wf::render_target_t& target)
         }
 
         float offset_z = identity_z_offset + Z_OFFSET_NEAR;
+        
+        // Tilt stays at 180° during cube mode, regardless of zoom level
+        float tilt_angle = glm::radians(180.0f);
+        
+        LOGI("########## rotate_and_zoom_cube: Setting max_tilt to 180° ##########");
 
         animation.cube_animation.rotation.set(angle, angle);
         animation.cube_animation.zoom.set(zoom, zoom);
@@ -2332,6 +2340,9 @@ void render_shader_background(const wf::render_target_t& target)
 
         animation.cube_animation.offset_y.set(0, 0);
         animation.cube_animation.offset_z.set(offset_z, offset_z);
+        animation.cube_animation.max_tilt.set(tilt_angle, tilt_angle);  // Always 180° in cube mode
+        
+        LOGI("After set: max_tilt=", glm::degrees((float)animation.cube_animation.max_tilt), "°");
 
         animation.cube_animation.start();
         update_view_matrix();
@@ -2399,11 +2410,25 @@ float required_z_for_height = grid_height / (2.0f * std::tan(fov / 2.0f));
 float required_z_for_width = grid_width / (2.0f * aspect * std::tan(fov / 2.0f));
 float required_z = std::max(required_z_for_height, required_z_for_width) * CUBE_SPACING;
 
-animation.cube_animation.zoom.set(1.0f, 1.0f);
+// Start zoomed out to show full grid
+// When cube is active, tilt is always at 180° regardless of zoom level
+// Tilt only interpolates to 0° during the exit animation
+float initial_zoom = 0.1f;  // Start mostly zoomed out
+float initial_tilt = glm::radians(180.0f);  // Always 180° while cube is active
+
+LOGI("=================================================================");
+LOGI("CUBE ACTIVATE: initial_zoom=", initial_zoom, " initial_tilt_deg=", glm::degrees(initial_tilt));
+LOGI("=================================================================");
+
+animation.cube_animation.zoom.set(initial_zoom, initial_zoom);
 animation.cube_animation.rotation.set(0, 0);
 animation.cube_animation.offset_y.set(0, 0);
 animation.cube_animation.offset_z.set(required_z, required_z);
 animation.cube_animation.ease_deformation.set(0, 0);
+animation.cube_animation.max_tilt.set(initial_tilt, initial_tilt);  // 180° while in cube mode
+
+LOGI("After setting animations: zoom=", (float)animation.cube_animation.zoom, 
+     " max_tilt=", glm::degrees((float)animation.cube_animation.max_tilt), "°");
         
 reload_background();
         
@@ -2541,6 +2566,9 @@ bool move_vp_vertical(int dir)
     animation.cube_animation.offset_y.restart_with_end(0);
     animation.cube_animation.offset_z.restart_with_end(required_z);
     animation.cube_animation.ease_deformation.restart_with_end(0);
+    animation.cube_animation.max_tilt.restart_with_end(glm::radians(180.0f));  // Set tilt to 180° in cube mode
+    
+    LOGI("########## move_vp_vertical: Setting max_tilt to 180° ##########");
     
     animation.cube_animation.start();
     update_view_matrix();
@@ -2550,11 +2578,16 @@ bool move_vp_vertical(int dir)
 // Modified reset_attribs to maintain camera position during transitions
 void reset_attribs()
 {
+    float current_tilt = animation.cube_animation.max_tilt;
+    
+    LOGI("reset_attribs: Animating tilt from ", glm::degrees(current_tilt), "° to 0°");
+    
     animation.cube_animation.zoom.restart_with_end(1.0);
     animation.cube_animation.offset_z.restart_with_end(
         identity_z_offset + Z_OFFSET_NEAR);
     animation.cube_animation.offset_y.restart_with_end(0);
     animation.cube_animation.ease_deformation.restart_with_end(0);
+    animation.cube_animation.max_tilt.restart_with_end(0);  // Interpolate tilt to 0 during exit
     // Don't reset camera_y_offset here - let it maintain position until deactivate
 }
     /* Start moving to a workspace to the left/right using the keyboard */
@@ -2635,8 +2668,6 @@ void reset_attribs()
         /* And reset other attributes, again to align the workspace with the output
          * */
         reset_attribs();
-        has_virtual_hit = true;
-virtual_ray_hit_pos = {0.0f, 0.0f, 0.0f};
 
         popout_scale_animation.animate(1.01); //longer time to fix screen glitch
         animation.cube_animation.start();
@@ -2742,7 +2773,11 @@ glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scal
     glm::mat4 tilt = glm::mat4(1.0f);
     glm::mat4 pivot_rotation = glm::mat4(1.0f);
     
-    if (has_virtual_hit && !is_window_layer) {
+    // During exit animation (in_exit=true), apply tilt to ALL workspaces to interpolate smoothly to 0
+    // During normal cube mode, only apply tilt based on cursor position
+    bool should_apply_tilt = animation.in_exit || (has_virtual_hit && !is_window_layer);
+    
+    if (should_apply_tilt && !is_window_layer) {
         // Calculate which workspace this face represents
         auto cws = output->wset()->get_current_workspace();
         int this_workspace_x = i;  // Workspace horizontal index
@@ -2755,8 +2790,8 @@ glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scal
         bool has_windows = workspace_has_windows(this_workspace_x, this_workspace_y);
         
         if (!has_windows) {
-            // No windows on this workspace - apply rotation
-            glm::vec3 hit_pos = virtual_ray_hit_pos;
+            // During exit, use center position for tilt calculation
+            glm::vec3 hit_pos = animation.in_exit ? glm::vec3(0.0f, 0.0f, 0.0f) : virtual_ray_hit_pos;
             
             // ALL ROWS COPY TOP ROW: Only use X distance, ignore vertical offset completely
             float dx = x_offset - hit_pos.x;  // Only horizontal distance matters
@@ -2771,18 +2806,31 @@ glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scal
                 float rotation_strength = std::sin(t * M_PI);
                 float pivot_angle = rotation_strength * glm::radians(40.0f) * (dx > 0 ? 1.0f : -1.0f);
                 
-                pivot_rotation = glm::rotate(glm::mat4(1.0f), pivot_angle, glm::vec3(0.0f, 1.0f, 0.0f));
+                // Don't apply pivot rotation during exit animation
+                if (!animation.in_exit) {
+                    pivot_rotation = glm::rotate(glm::mat4(1.0f), pivot_angle, glm::vec3(0.0f, 1.0f, 0.0f));
+                }
             }
             
             // Tilt effect - also only based on X distance
             const float max_ws_radius = 4.0f;
             const float ws_dist = dist_x / CUBE_SPACING;
             
-            if (ws_dist > 1.0f && ws_dist <= max_ws_radius) {
+            // During exit, apply tilt to ALL workspaces. During normal mode, only apply beyond ws_dist > 1.0
+            bool in_tilt_range = animation.in_exit || (ws_dist > 1.0f && ws_dist <= max_ws_radius);
+            
+            if (in_tilt_range) {
                 float tilt_factor = smoothstep(1.0f, max_ws_radius, ws_dist);
-                float max_tilt_rad = glm::radians(180.0f);
+                float max_tilt_rad = animation.cube_animation.max_tilt;  // Use animated tilt value
                 
-                if (dist_x > 1e-6f && tilt_factor > 0.0f) {
+                // Debug output (only log occasionally to avoid spam)
+                static int log_counter = 0;
+                if (log_counter++ % 100 == 0) {
+                    LOGI("Tilt calc: in_exit=", animation.in_exit, " max_tilt_rad=", glm::degrees(max_tilt_rad), 
+                         "° tilt_factor=", tilt_factor, " ws_dist=", ws_dist, " i=", i);
+                }
+                
+                if (dist_x > 1e-6f && tilt_factor > 0.0f && max_tilt_rad > 0.0f) {
                     float tilt_y = -(dx / dist_x) * max_tilt_rad * tilt_factor;
                     
                     auto rot_y = glm::rotate(glm::mat4(1.0f), tilt_y, glm::vec3(0.0f, 1.0f, 0.0f));
@@ -3034,24 +3082,6 @@ void render(const wf::scene::render_instruction_t& data,
 }
 
 
-// =========================================================================
-// EXPLANATION:
-// =========================================================================
-// The issue was that render_cursor_indicator() was being called BEFORE
-// glDisable(GL_DEPTH_TEST), which meant the cursor was being depth-tested
-// against the cube faces and getting hidden behind them.
-//
-// By moving render_cursor_indicator() to AFTER glDisable(GL_DEPTH_TEST),
-// the cursor will always render on top regardless of its Z position.
-//
-// Order matters:
-// 1. Render all cubes WITH depth test
-// 2. Deactivate cube program
-// 3. Disable depth test
-// 4. Render cursor (no depth test = always visible on top)
-// 5. Disable blend
-
-
 
 wf::effect_hook_t pre_hook = [=] ()
 {
@@ -3273,6 +3303,8 @@ void render_cursor_indicator(const glm::mat4& vp)
 
 void pointer_scrolled(double amount)
 {
+    LOGI("pointer_scrolled called: amount=", amount, " in_exit=", animation.in_exit);
+    
     if (animation.in_exit)
     {
         return;
@@ -3283,6 +3315,8 @@ void pointer_scrolled(double amount)
 
     float target_zoom = animation.cube_animation.zoom;
     float start_zoom  = target_zoom;
+    
+    LOGI("  Current zoom: start_zoom=", start_zoom);
 
     target_zoom +=
         std::min(std::pow(target_zoom, 1.5f), ZOOM_MAX) * amount * ZVelocity;
@@ -3311,9 +3345,13 @@ void pointer_scrolled(double amount)
     float base_z = identity_z_offset + Z_OFFSET_NEAR;
     float target_offset_z = required_z * (1.0f - zoom_factor) + base_z * zoom_factor;
     
+    // DON'T change tilt during scroll zoom - keep it at 180° while in cube mode
+    // Tilt only interpolates during exit animation (reset_attribs)
+    
     animation.cube_animation.offset_y.restart_with_end(0);
     animation.cube_animation.offset_z.restart_with_end(target_offset_z);
     animation.cube_animation.rotation.restart_with_end(animation.cube_animation.rotation.end);
+    // Don't touch max_tilt here - it stays at 180° during cube view
 
     animation.cube_animation.start();
     output->render->schedule_redraw();
