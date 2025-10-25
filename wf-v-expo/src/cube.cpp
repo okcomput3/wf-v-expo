@@ -341,6 +341,9 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         wf::point_t drag_start_workspace;
         wf::pointf_t last_cursor_pos;
         bool cursor_hidden_by_cube = false;
+        
+        // Flag to track if workspace was already set (e.g., by right-click)
+        bool workspace_already_set = false;
 wf::geometry_t dragged_window_original_geometry;
 bool is_moving_within_desktop = false;
 wf::pointf_t drag_offset; // Offset from window position to cursor when drag started
@@ -1832,12 +1835,74 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
     {
         if (event.state == WL_POINTER_BUTTON_STATE_PRESSED)
         {
-            LOGI("Right-click - deactivating cube");
+            LOGI("Right-click - detecting target workspace");
+            
+            // Get cursor position and raycast to find which workspace we're hovering
+            auto cursor = wf::get_core().get_cursor_position();
+            Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
+            
+            // Use desktop layer raycasting (not window layer) to detect workspace faces
+            HitInfo hit = raycast_to_workspace(ray.origin, ray.dir, output);
+            
+            if (hit.ws.x >= 0)
+            {
+                LOGI("Right-click on workspace (", hit.ws.x, ",", hit.ws.y, ")");
+                
+                auto ws_set = output->wset();
+                auto current_ws = ws_set->get_current_workspace();
+                
+                // Calculate workspace delta
+                int dx = hit.ws.x - current_ws.x;
+                int dy = hit.ws.y - current_ws.y;
+                
+                LOGI("Delta: dx=", dx, ", dy=", dy);
+                
+                // Switch to target workspace first
+                ws_set->set_workspace(wf::point_t{hit.ws.x, hit.ws.y});
+                
+                // Mark that workspace is already set, so deactivate() doesn't switch again
+                workspace_already_set = true;
+                
+                // Now manually set up the exit animation
+                animation.in_exit = true;
+                
+                // Calculate target rotation: we want to rotate TO the target workspace
+                // Current rotation represents where we are, we need to add the delta
+                float current_rotation = animation.cube_animation.rotation;
+                float rotation_delta = -dx * animation.side_angle;  // Negative because right is negative rotation
+                float target_rotation = current_rotation + rotation_delta;
+                
+                // But input_ungrabbed expects rotation to already represent the workspace
+                // So we need to set it to what it WOULD be for that workspace
+                // Then input_ungrabbed will align it to 0
+                target_rotation = -hit.ws.x * animation.side_angle;
+                
+                animation.cube_animation.rotation.set(current_rotation, target_rotation);
+                
+                LOGI("Rotation: current=", current_rotation, ", target=", target_rotation);
+                
+                // Handle vertical offset
+                // CUBE_VERTICAL_SPACING is already negative (-1.2), so no need for extra minus
+                float target_y = static_cast<float>(hit.ws.y) * CUBE_VERTICAL_SPACING;
+                camera_y_offset.animate(target_y);
+                
+                // Reset other attributes
+                reset_attribs();
+                
+                popout_scale_animation.animate(1.01);
+                animation.cube_animation.start();
+                
+                update_view_matrix();
+                output->render->schedule_redraw();
+            }
+            else
+            {
+                LOGI("Right-click in void - exiting to current workspace");
+                input_ungrabbed();
+            }
             
             // Disable cursor indicator when exiting
             cursor_indicator.active = false;
-            
-            input_ungrabbed();
         }
     }
     
@@ -2292,6 +2357,9 @@ void render_shader_background(const wf::render_target_t& target)
     {
         GL_CALL(glGenBuffers(1, &trail_vbo));
     }
+    
+    // Reset workspace flag when plugin activates
+    workspace_already_set = false;
 
  output->wset()->set_workspace({0, 0});
 
@@ -2397,22 +2465,29 @@ wf::gles::run_in_context([&]
     on_motion_event.disconnect();
 
     /* Figure out how much we have rotated and switch workspace */
-    int size = get_num_faces();
-    int dvx  = calculate_viewport_dx_from_rotation();
-    
-    // NEW: Calculate vertical workspace change based on camera position
-    int dvy = calculate_viewport_dy_from_camera();
+    // Only calculate and switch if workspace wasn't already set (e.g., by right-click)
+    if (!workspace_already_set)
+    {
+        int size = get_num_faces();
+        int dvx  = calculate_viewport_dx_from_rotation();
+        
+        // NEW: Calculate vertical workspace change based on camera position
+        int dvy = calculate_viewport_dy_from_camera();
 
-    auto cws = output->wset()->get_current_workspace();
-    auto grid = output->wset()->get_workspace_grid_size();
+        auto cws = output->wset()->get_current_workspace();
+        auto grid = output->wset()->get_workspace_grid_size();
+        
+        int nvx = (cws.x + (dvx % size) + size) % size;
+        int nvy = (cws.y + dvy) % grid.height;
+        
+        // Clamp to valid workspace range
+        nvy = std::max(0, std::min(nvy, grid.height - 1));
+        
+        output->wset()->set_workspace({nvx, nvy});
+    }
     
-    int nvx = (cws.x + (dvx % size) + size) % size;
-    int nvy = (cws.y + dvy) % grid.height;
-    
-    // Clamp to valid workspace range
-    nvy = std::max(0, std::min(nvy, grid.height - 1));
-    
-    output->wset()->set_workspace({nvx, nvy});
+    // Reset the flag for next time
+    workspace_already_set = false;
 
 has_virtual_hit = false;
 virtual_ray_hit_pos = {0.0f, 0.0f, 0.0f};
@@ -2560,6 +2635,8 @@ void reset_attribs()
         /* And reset other attributes, again to align the workspace with the output
          * */
         reset_attribs();
+        has_virtual_hit = true;
+virtual_ray_hit_pos = {0.0f, 0.0f, 0.0f};
 
         popout_scale_animation.animate(1.01); //longer time to fix screen glitch
         animation.cube_animation.start();
