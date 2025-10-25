@@ -2410,25 +2410,24 @@ float required_z_for_height = grid_height / (2.0f * std::tan(fov / 2.0f));
 float required_z_for_width = grid_width / (2.0f * aspect * std::tan(fov / 2.0f));
 float required_z = std::max(required_z_for_height, required_z_for_width) * CUBE_SPACING;
 
-// Start zoomed out to show full grid
-// When cube is active, tilt is always at 180° regardless of zoom level
-// Tilt only interpolates to 0° during the exit animation
-float initial_zoom = 0.1f;  // Start mostly zoomed out
-float initial_tilt = glm::radians(180.0f);  // Always 180° while cube is active
+// ZOOM OUT animation on activation (reverse of reset_attribs zoom IN)
+// reset_attribs does: zoom→1.0, offset_z→(identity_z_offset + Z_OFFSET_NEAR), tilt→0°
+// We do the reverse: zoom→0.1, offset_z→required_z, tilt→180°
+float current_tilt = animation.cube_animation.max_tilt;
 
 LOGI("=================================================================");
-LOGI("CUBE ACTIVATE: initial_zoom=", initial_zoom, " initial_tilt_deg=", glm::degrees(initial_tilt));
+LOGI("CUBE ACTIVATE: Animating zoom OUT (reverse of reset_attribs)");
+LOGI("              Animating tilt from ", glm::degrees(current_tilt), "° to 180°");
 LOGI("=================================================================");
 
-animation.cube_animation.zoom.set(initial_zoom, initial_zoom);
-animation.cube_animation.rotation.set(0, 0);
-animation.cube_animation.offset_y.set(0, 0);
-animation.cube_animation.offset_z.set(required_z, required_z);
-animation.cube_animation.ease_deformation.set(0, 0);
-animation.cube_animation.max_tilt.set(initial_tilt, initial_tilt);  // 180° while in cube mode
+animation.cube_animation.zoom.restart_with_end(0.1f);
+animation.cube_animation.rotation.restart_with_end(0);
+animation.cube_animation.offset_y.restart_with_end(0);
+animation.cube_animation.offset_z.restart_with_end(required_z);
+animation.cube_animation.ease_deformation.restart_with_end(0);
+animation.cube_animation.max_tilt.restart_with_end(glm::radians(180.0f));
 
-LOGI("After setting animations: zoom=", (float)animation.cube_animation.zoom, 
-     " max_tilt=", glm::degrees((float)animation.cube_animation.max_tilt), "°");
+animation.cube_animation.start();
         
 reload_background();
         
