@@ -272,3 +272,133 @@ void main() {
     
     outColor = vec4(finalColor, finalAlpha);
 })";
+
+
+
+static const char *cube_fragment_3_2_tron =
+R"(#version 320 es
+precision highp float;
+precision highp sampler2D;
+in highp vec2 guv;
+in highp vec3 colorFactor;
+layout(location = 0) out highp vec4 outColor;
+uniform highp sampler2D smp;
+uniform highp float u_time;
+
+// TRON-STYLE EDGE CONFIGURATION
+#define LINE_WIDTH 0.008                      // Thickness of traveling line
+#define LINE_LENGTH 0.12                      // Length of traveling segment
+#define GLOW_WIDTH 0.55                      // Glow spread
+#define ANIMATION_SPEED 0.2                   // Speed of travel
+#define BASE_EDGE_GLOW 0.7                    // Subtle constant edge glow
+#define NUM_LINES 12                           // Number of traveling lines
+
+// LINE COLORS - Blue, Red, Green, White
+#define LINE_COLOR_0 vec3(0.0, 0.5, 1.0)     // Blue
+#define LINE_COLOR_1 vec3(0.0, 0.5, 1.0)      // Red
+#define LINE_COLOR_2 vec3(0.0, 0.5, 1.0)      // Green
+#define LINE_COLOR_3 vec3(0.0, 0.5, 1.0)      // White
+
+float roundedCornerMask(vec2 uv, float radius) {
+    vec2 centered_uv = uv - 0.5;
+    vec2 corner_dist = abs(centered_uv) - (0.5 - radius);
+    if (corner_dist.x <= 0.0 && corner_dist.y <= 0.0) {
+        return 1.0;
+    }
+    if (corner_dist.x > 0.0 && corner_dist.y > 0.0) {
+        float dist_to_corner = length(corner_dist);
+        return smoothstep(radius + 0.01, radius - 0.01, dist_to_corner);
+    }
+    return 1.0;
+}
+
+float edgeAntiAliasMask(vec2 uv) {
+    float min_edge_dist = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    float aa_width = 0.01;
+    return smoothstep(0.0, aa_width, min_edge_dist);
+}
+
+float distanceToEdge(vec2 uv) {
+    float dist_left = uv.x;
+    float dist_right = 1.0 - uv.x;
+    float dist_bottom = uv.y;
+    float dist_top = 1.0 - uv.y;
+    return min(min(dist_left, dist_right), min(dist_bottom, dist_top));
+}
+
+float uvToPerimeter(vec2 uv) {
+    vec2 p = uv;
+    float edge_dist = distanceToEdge(uv);
+    
+    if (edge_dist == p.y) {
+        return p.x;  // Bottom edge
+    } else if (edge_dist == (1.0 - p.x)) {
+        return 1.0 + p.y;  // Right edge
+    } else if (edge_dist == (1.0 - p.y)) {
+        return 3.0 - p.x;  // Top edge
+    } else {
+        return 4.0 - p.y;  // Left edge
+    }
+}
+
+// Get color for each line based on index
+vec3 getLineColor(int index) {
+    if (index == 0) return LINE_COLOR_0;
+    if (index == 1) return LINE_COLOR_1;
+    if (index == 2) return LINE_COLOR_2;
+    return LINE_COLOR_3;
+}
+
+void main() {
+    vec2 center = vec2(0.5);
+    vec2 dir = guv - center;
+    float dist = length(dir);
+    float ripple = sin(dist * 20.0 - u_time * 5.0) * 0.01;
+    vec2 distorted_uv = guv + normalize(dir) * ripple;
+    
+    highp vec4 texColor = texture(smp, distorted_uv);
+    
+    float corner_radius = 0.08;
+    float corner_mask = roundedCornerMask(guv, corner_radius);
+    float edge_mask = edgeAntiAliasMask(guv);
+    float final_mask = min(corner_mask, edge_mask);
+    
+    vec3 finalColor = texColor.rgb * colorFactor;
+    
+    // TRON TRAVELING LINES (4 DIFFERENT COLORED LINES)
+    float edge_dist = distanceToEdge(guv);
+    
+    if (edge_dist < 0.05) {
+        float perimeter_pos = uvToPerimeter(guv);
+        float spacing = 4.0 / float(NUM_LINES);
+        
+        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
+        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
+        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
+        
+        // Create 4 lines, each with its own color
+        for (int i = 0; i < NUM_LINES; i++) {
+            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, 4.0);
+            float dist_to_line = abs(perimeter_pos - line_pos);
+            dist_to_line = min(dist_to_line, abs(dist_to_line - 4.0));
+            
+            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
+            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
+            line_intensity = max(line_intensity, trail_intensity);
+            
+            // Get the color for this specific line
+            vec3 this_line_color = getLineColor(i);
+            vec3 this_glow_color = this_line_color * 0.6;
+            
+            // Apply this line's color
+            finalColor += this_line_color * sharp_line * line_intensity * edge_falloff * 2.0;
+            finalColor += this_glow_color * soft_glow * line_intensity * edge_falloff;
+        }
+        
+        // Add subtle constant edge glow (white)
+        finalColor += vec3(0.5, 0.5, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
+    }
+    
+    float finalAlpha = texColor.a * final_mask;
+    outColor = vec4(finalColor, finalAlpha);
+})";
