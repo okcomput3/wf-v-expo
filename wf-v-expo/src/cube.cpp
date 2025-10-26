@@ -173,117 +173,80 @@ void main() {
 }
 )";
 
-
-//https://www.shadertoy.com/view/4d3SWM
-// Background Fragment Shader - Volumetric space/nebula
+//https://www.shadertoy.com/view/XlfGRj
 static const char *background_fragment_shader = R"(
 #version 100
-#extension GL_OES_standard_derivatives : enable
 precision mediump float;
 uniform float u_time;
 uniform vec2 u_resolution;
 varying vec2 v_uv;
+// Star Nest by Pablo Roman Andrioli
+// License: MIT
+#define iterations 8
+#define formuparam 0.48
+#define volsteps 20
+#define stepsize 0.1
+#define zoom 0.800
+#define tile 0.850
+#define speed 0.01
+#define brightness 0.0005
+#define darkmatter 0.900
+#define distfading 0.630
+#define saturation 1.90
 
-// various noise functions
-float Hash3d(vec3 uv)
-{
-    float f = uv.x + uv.y * 37.0 + uv.z * 521.0;
-    return fract(cos(f*3.333)*100003.9);
-}
-
-float mixP(float f0, float f1, float a)
-{
-    return mix(f0, f1, a*a*(3.0-2.0*a));
-}
-
-const vec2 zeroOne = vec2(0.0, 1.0);
-
-float noise(vec3 uv)
-{
-    vec3 fr = fract(uv.xyz);
-    vec3 fl = floor(uv.xyz);
-    float h000 = Hash3d(fl);
-    float h100 = Hash3d(fl + zeroOne.yxx);
-    float h010 = Hash3d(fl + zeroOne.xyx);
-    float h110 = Hash3d(fl + zeroOne.yyx);
-    float h001 = Hash3d(fl + zeroOne.xxy);
-    float h101 = Hash3d(fl + zeroOne.yxy);
-    float h011 = Hash3d(fl + zeroOne.xyy);
-    float h111 = Hash3d(fl + zeroOne.yyy);
-    return mixP(
-        mixP(mixP(h000, h100, fr.x), mixP(h010, h110, fr.x), fr.y),
-        mixP(mixP(h001, h101, fr.x), mixP(h011, h111, fr.x), fr.y)
-        , fr.z);
-}
-
-float PI = 3.14159265;
-
-#define saturate(a) clamp(a, 0.0, 1.0)
-
-float Density(vec3 p)
-{
-    float final = noise(p*0.06125);
-    float other = noise(p*0.06125 + 1234.567);
-    other -= 0.5;
-    final -= 0.5;
-    final = 0.1/(abs(final*final*other));
-    final += 0.5;
-    return final*0.0001;
-}
-
-void main()
-{
-    // Convert v_uv to fragCoord
-    vec2 fragCoord = v_uv * u_resolution;
+void main() {
+    // Get coords and direction
+    vec2 uv = v_uv - 0.5;
+    uv.y *= u_resolution.y / u_resolution.x;
+    vec3 dir = vec3(uv * zoom, 1.0);
     
-    // ---------------- First, set up the camera rays for ray marching ----------------
-    vec2 uv = fragCoord.xy/u_resolution.xy * 2.0 - 1.0;
+    float time = u_time * speed + 0.25;
     
-    // Camera up vector.
-    vec3 camUp = vec3(0.0, 1.0, 0.0);
+    // Auto-rotation (100x slower)
+    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
+    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
+    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
+    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
+    dir.xz *= rot1;
+    dir.xy *= rot2;
     
-    // Camera lookat.
-    vec3 camLookat = vec3(0.0, 0.0, 0.0);
+    vec3 from = vec3(1.0, 0.5, 0.5);
+    from += vec3(time * 2.0, time, -2.0);
+    from.xz *= rot1;
+    from.xy *= rot2;
     
-    // Mouse position (defaulting to center since we don't have mouse input)
-    vec2 mouse = u_resolution * 0.5;
-    float mx = mouse.x/u_resolution.x*PI*2.0 + u_time * 0.01;
-    float my = -mouse.y/u_resolution.y*10.0 + sin(u_time * 0.03)*0.2+0.2;
+    // Volumetric rendering
+    float s = 0.1;
+    float fade = 1.0;
+    vec3 v = vec3(0.0);
     
-    vec3 camPos = vec3(cos(my)*cos(mx), sin(my), cos(my)*sin(mx))*(200.2);
-    
-    // Camera setup.
-    vec3 camVec = normalize(camLookat - camPos);
-    vec3 sideNorm = normalize(cross(camUp, camVec));
-    vec3 upNorm = cross(camVec, sideNorm);
-    vec3 worldFacing = (camPos + camVec);
-    vec3 worldPix = worldFacing + uv.x * sideNorm * (u_resolution.x/u_resolution.y) + uv.y * upNorm;
-    vec3 relVec = normalize(worldPix - camPos);
-    
-    // --------------------------------------------------------------------------------
-    float t = 0.0;
-    float inc = 0.02;
-    float maxDepth = 70.0;
-    vec3 pos = vec3(0.0, 0.0, 0.0);
-    float density = 0.0;
-    
-    // ray marching time
-    for (int i = 0; i < 37; i++)
-    {
-        if ((t > maxDepth)) break;
-        pos = camPos + relVec * t;
-        float temp = Density(pos);
-        inc = 1.9 + temp*0.05;
-        density += temp * inc;
-        t += inc;
+    for (int r = 0; r < volsteps; r++) {
+        vec3 p = from + s * dir * 10.5;
+        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0))); // tiling fold
+        
+        float pa = 0.0;
+        float a = 0.0;
+        for (int i = 0; i < iterations; i++) { 
+            p = abs(p) / dot(p, p) - formuparam; // the magic formula
+            a += abs(length(p) - pa); // absolute sum of average change
+            pa = length(p);
+        }
+        
+        float dm = max(0.0, darkmatter - a * a * 0.1); // dark matter
+        a *= a * a; // add contrast
+        
+       // if (r > 6) {
+            fade *= 1.0 - dm; // dark matter, don't render near
+       // }
+        
+        v += fade;
+        v += vec3(s, s * s, s * s * s) * a * brightness * fade; // coloring based on distance
+        fade *= distfading; // distance fading
+        s += stepsize;
     }
     
-    // --------------------------------------------------------------------------------
-    // Now that we have done our ray marching, let's put some color on this.
-    vec3 finalColor = vec3(0.01, 0.1, 1.0) * density * 0.2;
-    
-    // output the final color with sqrt for "gamma correction"
-    gl_FragColor = vec4(sqrt(clamp(finalColor, 0.0, 1.0)), 1.0);
+   v = mix(vec3(length(v)), v, saturation); // color adjust
+    gl_FragColor = vec4(v * 0.01, 1.0);
 }
 )";
 
@@ -1177,17 +1140,19 @@ private:
     wf::option_wrapper_t<double> XVelocity{"vertical_expo/speed_spin_horiz"},
     YVelocity{"vertical_expo/speed_spin_vert"}, ZVelocity{"vertical_expo/speed_zoom"};
     wf::option_wrapper_t<double> zoom_opt{"vertical_expo/zoom"};
-    wf::option_wrapper_t<bool> enable_window_popout{"vertical_expo/enable_window_popout"};
-    wf::option_wrapper_t<double> popout_scale{"vertical_expo/popout_scale"};  // e.g., 1.15 = 15% larger
-    wf::option_wrapper_t<double> popout_opacity{"vertical_expo/popout_opacity"};  // 0.0 to 1.0
+//    wf::option_wrapper_t<bool> enable_window_popout{"vertical_expo/enable_window_popout"};
+ //   wf::option_wrapper_t<double> popout_scale{"vertical_expo/popout_scale"};  // e.g., 1.15 = 15% larger
+  //  wf::option_wrapper_t<double> popout_opacity{"vertical_expo/popout_opacity"};  // 0.0 to 1.0
     OpenGL::program_t cap_program;  // Separate program for caps
-    wf::option_wrapper_t<bool> enable_caps{"vertical_expo/enable_caps"};
-    wf::option_wrapper_t<double> cap_alpha{"vertical_expo/cap_alpha"};
-    wf::option_wrapper_t<wf::color_t> cap_color_top{"vertical_expo/cap_color_top"};
-    wf::option_wrapper_t<wf::color_t> cap_color_bottom{"vertical_expo/cap_color_bottom"};
-    wf::option_wrapper_t<std::string> cap_texture_top{"vertical_expo/cap_texture_top"};
-    wf::option_wrapper_t<std::string> cap_texture_bottom{"vertical_expo/cap_texture_bottom"};
-    
+  //  wf::option_wrapper_t<bool> enable_caps{"vertical_expo/enable_caps"};
+   // wf::option_wrapper_t<double> cap_alpha{"vertical_expo/cap_alpha"};
+  //  wf::option_wrapper_t<wf::color_t> cap_color_top{"vertical_expo/cap_color_top"};
+  //  wf::option_wrapper_t<wf::color_t> cap_color_bottom{"vertical_expo/cap_color_bottom"};
+  //  wf::option_wrapper_t<std::string> cap_texture_top{"vertical_expo/cap_texture_top"};
+  //  wf::option_wrapper_t<std::string> cap_texture_bottom{"vertical_expo/cap_texture_bottom"};
+    wf::option_wrapper_t<bool> tron{"vertical_expo/tron"};
+    wf::option_wrapper_t<bool> star_background{"vertical_expo/star_background"};
+
     OpenGL::program_t background_program;
     GLuint background_vbo = 0;
 
@@ -2231,7 +2196,11 @@ void load_program()
         auto id = GL_CALL(glCreateProgram());
         GLuint vss, fss, tcs, tes, gss;
         vss = OpenGL::compile_shader(cube_vertex_3_2, GL_VERTEX_SHADER);
-        fss = OpenGL::compile_shader(cube_fragment_3_2, GL_FRAGMENT_SHADER);
+if (!tron)
+        {fss = OpenGL::compile_shader(cube_fragment_3_2, GL_FRAGMENT_SHADER);}
+if (tron)
+        {fss = OpenGL::compile_shader(cube_fragment_3_2_tron, GL_FRAGMENT_SHADER);}
+        
         tcs = OpenGL::compile_shader(cube_tcs_3_2, GL_TESS_CONTROL_SHADER);
         tes = OpenGL::compile_shader(cube_tes_3_2, GL_TESS_EVALUATION_SHADER);
         gss = OpenGL::compile_shader(cube_geometry_3_2, GL_GEOMETRY_SHADER);
@@ -2489,7 +2458,7 @@ LOGI("After setting animations: zoom=", (float)animation.cube_animation.zoom,
         
 reload_background();
         
-        popout_scale_animation.animate(1.0, popout_scale);
+        popout_scale_animation.animate(1.0, 1.2);
         // Force a full redraw to clear any stale state
         output->render->damage_whole();
         
@@ -2534,10 +2503,6 @@ void deactivate()
     output->render->rem_effect(&pre_hook);
   //  output->render->set_require_depth_buffer(false);
 
-wf::gles::run_in_context([&]
-{
-    GL_CALL(glClear(GL_DEPTH_BUFFER_BIT));
-});
 
 
 
@@ -3012,7 +2977,8 @@ void render(const wf::scene::render_instruction_t& data,
         GL_CALL(glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT));
 
         // RENDER SHADER BACKGROUND FIRST
-     //   render_shader_background(data.target);
+       if(star_background)
+        {render_shader_background(data.target);}
 
         GL_CALL(glClear(GL_DEPTH_BUFFER_BIT));
 
@@ -3098,7 +3064,7 @@ void render(const wf::scene::render_instruction_t& data,
         // RENDER WINDOWS (true = windows, in front!)
         // ============================================
         
-        if (enable_window_popout)
+      //  if (enable_window_popout)
         {
             float scale = popout_scale_animation;
             
