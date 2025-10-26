@@ -35,6 +35,16 @@
 			</option>
 		</group>
 		<!-- Effects -->
+			<option name="tron" type="bool">
+				<_short>tron borders</_short>
+				<_long>tron borders.</_long>
+				<default>false</default>
+			</option>
+			<option name="star_background" type="bool">
+				<_short>star_background</_short>
+				<_long>star_background.</_long>
+				<default>false</default>
+			</option>
 		<option name="deform" type="int">
 			<_short>Deformation</_short>
 			<_long>Specifies the deformation to be used.</_long>
@@ -59,72 +69,6 @@
 			<_long>Specifies whether to use lighting.</_long>
 			<default>true</default>
 		</option>
-		<!-- Window Popout -->
-		<group>
-			<_short>Window Popout Effect</_short>
-			<_long>Creates a larger cube showing only windows without background.</_long>
-			<option name="enable_window_popout" type="bool">
-				<_short>Enable window popout</_short>
-				<_long>Enables rendering of a larger cube showing only windows floating above the main cube.</_long>
-				<default>true</default>
-			</option>
-			<option name="popout_scale" type="double">
-				<_short>Popout scale</_short>
-				<_long>Sets how much larger the window popout cube should be compared to the main cube. 1.0 = same size, 1.2 = 20% larger.</_long>
-				<default>1.20</default>
-				<min>1.0</min>
-				<max>2.0</max>
-				<precision>0.01</precision>
-			</option>
-			<option name="popout_opacity" type="double">
-				<_short>Popout opacity</_short>
-				<_long>Sets the opacity of the window popout cube. 1.0 = fully opaque, 0.5 = semi-transparent.</_long>
-				<default>1.0</default>
-				<min>0.0</min>
-				<max>1.0</max>
-				<precision>0.01</precision>
-			</option>
-		</group>
-		<!-- Cube Caps -->
-		<group>
-			<_short>Cube Caps</_short>
-			<_long>Settings for the top and bottom caps of the cube.</_long>
-			<option name="enable_caps" type="bool">
-				<_short>Enable caps</_short>
-				<_long>Enables rendering of top and bottom caps on the cube. Caps are N-sided polygons matching the number of workspace faces.</_long>
-				<default>true</default>
-			</option>
-			<option name="cap_alpha" type="double">
-				<_short>Cap transparency</_short>
-				<_long>Sets the transparency of the cube caps. 1.0 = fully opaque, 0.0 = fully transparent.</_long>
-				<default>0.8</default>
-				<min>0.0</min>
-				<max>1.0</max>
-				<precision>0.01</precision>
-			</option>
-			<option name="cap_color_top" type="color">
-				<_short>Top cap color</_short>
-				<_long>Sets the color/tint for the top cap of the cube.</_long>
-				<default>0.8 0.8 0.8 1.0</default>
-			</option>
-			<option name="cap_color_bottom" type="color">
-				<_short>Bottom cap color</_short>
-				<_long>Sets the color/tint for the bottom cap of the cube.</_long>
-				<default>0.8 0.8 0.8 1.0</default>
-			</option>
-			<option name="cap_texture_top" type="string">
-				<_short>Top cap texture</_short>
-				<_long>Loads the specified texture for the top cap. Leave empty to use solid color.</_long>
-				<hint>file</hint>
-				<default></default>
-			</option>
-			<option name="cap_texture_bottom" type="string">
-				<_short>Bottom cap texture</_short>
-				<_long>Loads the specified texture for the bottom cap. Leave empty to use solid color.</_long>
-				<hint>file</hint>
-				<default></default>
-			</option>
-		</group>
 		<!-- Zoom -->
 		<option name="zoom" type="double">
 			<_short>Zoom</_short>
