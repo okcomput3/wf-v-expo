@@ -173,8 +173,1470 @@ void main() {
 }
 )";
 
-//https://www.shadertoy.com/view/XlfGRj
+/*
 static const char *background_fragment_shader = R"(
+#version 100
+precision mediump float;
+uniform float u_time;
+uniform vec2 u_resolution;
+varying vec2 v_uv;
+
+// Star Nest by Pablo Roman Andrioli
+// License: MIT
+#define iterations 8
+#define formuparam 0.48
+#define volsteps 20
+#define stepsize 0.1
+#define zoom 0.800
+#define tile 0.850
+#define speed 0.01
+#define brightness 0.0005
+#define darkmatter 0.900
+#define distfading 0.630
+#define saturation 1.90
+
+// TRON-STYLE EDGE CONFIGURATION
+#define LINE_WIDTH 0.008
+#define LINE_LENGTH 0.12
+#define GLOW_WIDTH 0.55
+#define ANIMATION_SPEED 0.2
+#define BASE_EDGE_GLOW 0.5
+#define NUM_LINES 12
+#define EDGE_MARGIN 0.0
+
+// LINE COLOR - Blue
+#define LINE_COLOR vec3(0.0, 0.5, 1.0)
+
+// NEW TRON ELEMENTS
+#define GRID_SIZE 0.05
+#define GRID_WIDTH 0.001
+#define GRID_GLOW 0.15
+#define SCANLINE_SPEED 0.3
+#define HEX_GLOW 0.2
+#define PI 3.14159265359
+
+float distanceToEdge(vec2 uv, vec2 resolution) {
+    vec2 pixel_pos = uv * resolution;
+    float dist_left = pixel_pos.x - EDGE_MARGIN;
+    float dist_right = resolution.x - EDGE_MARGIN - pixel_pos.x;
+    float dist_bottom = pixel_pos.y - EDGE_MARGIN;
+    float dist_top = resolution.y - EDGE_MARGIN - pixel_pos.y;
+    return min(min(dist_left, dist_right), min(dist_bottom, dist_top)) / resolution.x;
+}
+
+float uvToPerimeter(vec2 uv, vec2 resolution) {
+    vec2 pixel_pos = uv * resolution;
+    vec2 margin = vec2(EDGE_MARGIN);
+    vec2 inner_size = resolution - 2.0 * margin;
+    vec2 p = (pixel_pos - margin) / inner_size.x;
+    
+    float dist_left = p.x;
+    float dist_right = (inner_size.x / inner_size.x) - p.x;
+    float dist_bottom = p.y * (inner_size.y / inner_size.x);
+    float dist_top = (inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x);
+    
+    float edge_dist = min(min(dist_left, dist_right), min(dist_bottom, dist_top));
+    float perimeter_length = 2.0 * (1.0 + inner_size.y / inner_size.x);
+    
+    if (edge_dist == dist_bottom) {
+        return p.x / perimeter_length;
+    } else if (edge_dist == dist_right) {
+        return (1.0 + p.y * (inner_size.y / inner_size.x)) / perimeter_length;
+    } else if (edge_dist == dist_top) {
+        return (1.0 + (inner_size.y / inner_size.x) + (1.0 - p.x)) / perimeter_length;
+    } else {
+        return (2.0 + (inner_size.y / inner_size.x) + ((inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x))) / perimeter_length;
+    }
+}
+
+// Rotation
+vec2 rotate2D(vec2 p, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+// Grid pattern
+float grid(vec2 uv) {
+    vec2 grid_uv = fract(uv / GRID_SIZE);
+    vec2 grid_line = smoothstep(GRID_WIDTH, 0.0, abs(grid_uv - 0.5) - 0.5 + GRID_WIDTH);
+    return max(grid_line.x, grid_line.y);
+}
+
+// Hexagon shape
+float hexagon(vec2 p, float r) {
+    vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
+    p = abs(p);
+    p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+    p -= vec2(clamp(p.x, -k.z * r, k.z * r), r);
+    return length(p) * sign(p.y);
+}
+
+// Spinning hexagon with glow
+vec3 spinningHexagon(vec2 uv, vec2 center, float size, float atime, float aspeed) {
+    vec2 p = uv - center;
+    p = rotate2D(p, atime * aspeed);
+    
+    float d = hexagon(p, size);
+    float outline = smoothstep(0.003, 0.0, abs(d));
+    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3;
+    
+    return LINE_COLOR * (outline + glow);
+}
+
+// Rotating circle ring
+vec3 rotatingRing(vec2 uv, vec2 center, float radius, float atime, float aspeed) {
+    vec2 p = uv - center;
+    float angle = atime * aspeed;
+    
+    float d = length(p) - radius;
+    float ring = smoothstep(0.003, 0.0, abs(d + 0.01)) + smoothstep(0.003, 0.0, abs(d - 0.01));
+    float glow = smoothstep(0.03, 0.0, abs(d)) * 0.2;
+    
+    // Add rotating dots on the ring - unroll loop
+    float a0 = angle + 0.0 * PI * 2.0 / 6.0;
+    vec2 dotPos0 = vec2(cos(a0), sin(a0)) * radius;
+    float dotDist0 = length(p - dotPos0);
+    ring += smoothstep(0.01, 0.0, dotDist0);
+    glow += smoothstep(0.02, 0.0, dotDist0) * 0.5;
+    
+    float a1 = angle + 1.0 * PI * 2.0 / 6.0;
+    vec2 dotPos1 = vec2(cos(a1), sin(a1)) * radius;
+    float dotDist1 = length(p - dotPos1);
+    ring += smoothstep(0.01, 0.0, dotDist1);
+    glow += smoothstep(0.02, 0.0, dotDist1) * 0.5;
+    
+    float a2 = angle + 2.0 * PI * 2.0 / 6.0;
+    vec2 dotPos2 = vec2(cos(a2), sin(a2)) * radius;
+    float dotDist2 = length(p - dotPos2);
+    ring += smoothstep(0.01, 0.0, dotDist2);
+    glow += smoothstep(0.02, 0.0, dotDist2) * 0.5;
+    
+    float a3 = angle + 3.0 * PI * 2.0 / 6.0;
+    vec2 dotPos3 = vec2(cos(a3), sin(a3)) * radius;
+    float dotDist3 = length(p - dotPos3);
+    ring += smoothstep(0.01, 0.0, dotDist3);
+    glow += smoothstep(0.02, 0.0, dotDist3) * 0.5;
+    
+    float a4 = angle + 4.0 * PI * 2.0 / 6.0;
+    vec2 dotPos4 = vec2(cos(a4), sin(a4)) * radius;
+    float dotDist4 = length(p - dotPos4);
+    ring += smoothstep(0.01, 0.0, dotDist4);
+    glow += smoothstep(0.02, 0.0, dotDist4) * 0.5;
+    
+    float a5 = angle + 5.0 * PI * 2.0 / 6.0;
+    vec2 dotPos5 = vec2(cos(a5), sin(a5)) * radius;
+    float dotDist5 = length(p - dotPos5);
+    ring += smoothstep(0.01, 0.0, dotDist5);
+    glow += smoothstep(0.02, 0.0, dotDist5) * 0.5;
+    
+    return LINE_COLOR * (ring + glow);
+}
+
+// Triangle shape
+float triangle(vec2 p, float r) {
+    float k = sqrt(3.0);
+    p.x = abs(p.x) - r;
+    p.y = p.y + r / k;
+    if (p.x + k * p.y > 0.0) {
+        p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0;
+    }
+    p.x -= clamp(p.x, -2.0 * r, 0.0);
+    return -length(p) * sign(p.y);
+}
+
+// Rotating triangle
+vec3 rotatingTriangle(vec2 uv, vec2 center, float size, float atime, float aspeed) {
+    vec2 p = uv - center;
+    p = rotate2D(p, atime * aspeed);
+    
+    float d = triangle(p, size);
+    float outline = smoothstep(0.003, 0.0, abs(d));
+    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3;
+    
+    return LINE_COLOR * (outline + glow);
+}
+
+// Pulsing hexagon
+vec3 pulsingHexagon(vec2 uv, vec2 center, float baseSize, float atime, float aspeed) {
+    vec2 p = uv - center;
+    float pulse = sin(atime * aspeed) * 0.5 + 0.5;
+    float size = baseSize * (0.7 + pulse * 0.3);
+    
+    float d = hexagon(p, size);
+    float outline = smoothstep(0.003, 0.0, abs(d));
+    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3 * pulse;
+    
+    return LINE_COLOR * (outline + glow * 2.0);
+}
+
+// Orbiting shapes - unrolled
+vec3 orbitingShapes(vec2 uv, vec2 center, float atime) {
+    vec3 color = vec3(0.0);
+    float orbitRadius = 0.15;
+    
+    float angle0 = atime * 0.5 + 0.0 * PI * 2.0 / 3.0;
+    vec2 orbitPos0 = center + vec2(cos(angle0), sin(angle0)) * orbitRadius;
+    vec2 p0 = uv - orbitPos0;
+    float d0 = length(p0) - 0.015;
+    float outline0 = smoothstep(0.002, 0.0, abs(d0));
+    float glow0 = smoothstep(0.02, 0.0, abs(d0)) * 0.5;
+    color += LINE_COLOR * (outline0 + glow0);
+    
+    float angle1 = atime * 0.5 + 1.0 * PI * 2.0 / 3.0;
+    vec2 orbitPos1 = center + vec2(cos(angle1), sin(angle1)) * orbitRadius;
+    vec2 p1 = uv - orbitPos1;
+    float d1 = length(p1) - 0.015;
+    float outline1 = smoothstep(0.002, 0.0, abs(d1));
+    float glow1 = smoothstep(0.02, 0.0, abs(d1)) * 0.5;
+    color += LINE_COLOR * (outline1 + glow1);
+    
+    float angle2 = atime * 0.5 + 2.0 * PI * 2.0 / 3.0;
+    vec2 orbitPos2 = center + vec2(cos(angle2), sin(angle2)) * orbitRadius;
+    vec2 p2 = uv - orbitPos2;
+    float d2 = length(p2) - 0.015;
+    float outline2 = smoothstep(0.002, 0.0, abs(d2));
+    float glow2 = smoothstep(0.02, 0.0, abs(d2)) * 0.5;
+    color += LINE_COLOR * (outline2 + glow2);
+    
+    return color;
+}
+
+// Scanlines
+float scanlines(vec2 uv, float atime) {
+    float line = sin((uv.y + atime * SCANLINE_SPEED) * 200.0);
+    return smoothstep(0.9, 1.0, line);
+}
+
+void main() {
+    // STAR NEST BACKGROUND
+    vec2 uv = v_uv - 0.5;
+    uv.y *= u_resolution.y / u_resolution.x;
+    vec3 dir = vec3(uv * zoom, 1.0);
+    
+    float time = u_time * speed + 0.25;
+    
+    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
+    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
+    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
+    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
+    dir.xz *= rot1;
+    dir.xy *= rot2;
+    
+    vec3 from = vec3(1.0, 0.5, 0.5);
+    from += vec3(time * 2.0, time, -2.0);
+    from.xz *= rot1;
+    from.xy *= rot2;
+    
+    float s = 0.1;
+    float fade = 1.0;
+    vec3 v = vec3(0.0);
+    
+    for (int r = 0; r < volsteps; r++) {
+        vec3 p = from + s * dir * 10.5;
+        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0)));
+        
+        float pa = 0.0;
+        float a = 0.0;
+        for (int i = 0; i < iterations; i++) { 
+            p = abs(p) / dot(p, p) - formuparam;
+            a += abs(length(p) - pa);
+            pa = length(p);
+        }
+        
+        float dm = max(0.0, darkmatter - a * a * 0.1);
+        a *= a * a;
+        
+        fade *= 1.0 - dm;
+        v += fade;
+        v += vec3(s, s * s, s * s * s) * a * brightness * fade;
+        fade *= distfading;
+        s += stepsize;
+    }
+    
+    v = mix(vec3(length(v)), v, saturation);
+    vec3 finalColor = v * 0.01;
+    
+    // NEW TRON ELEMENTS
+    vec2 centered_uv = v_uv - 0.5;
+    centered_uv.y *= u_resolution.y / u_resolution.x;
+    
+    // Add subtle grid
+    float gridPattern = grid(centered_uv * 5.0);
+    finalColor += LINE_COLOR * gridPattern * GRID_GLOW * 0.3;
+    
+    // Add horizontal scanlines
+    float scan = scanlines(v_uv, u_time);
+    finalColor += vec3(0.0, 0.3, 0.6) * scan * 0.15;
+    
+    // Add vertical accent lines (sparse)
+    float verticalLines = smoothstep(0.002, 0.0, abs(fract(v_uv.x * 8.0) - 0.5));
+    finalColor += LINE_COLOR * verticalLines * 0.2 * sin(u_time * 0.5 + v_uv.x * 10.0) * 0.5;
+    
+
+    // Rotating rings
+    finalColor += rotatingRing(centered_uv, vec2(0.0, 0.0), 0.12, u_time, 0.6);
+
+    // Orbiting small shapes around center
+    finalColor += orbitingShapes(centered_uv, vec2(0.0, 0.0), u_time);
+    
+    // TRON TRAVELING LINES OVERLAY (Original)
+    float edge_dist = distanceToEdge(v_uv, u_resolution);
+    
+    if (edge_dist < 0.05 && edge_dist > 0.0) {
+        float perimeter_pos = uvToPerimeter(v_uv, u_resolution);
+        float perimeter_length = 2.0 * (1.0 + (u_resolution.y - 2.0 * EDGE_MARGIN) / (u_resolution.x - 2.0 * EDGE_MARGIN));
+        float spacing = perimeter_length / float(NUM_LINES);
+        
+        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
+        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
+        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
+        
+        for (int i = 0; i < NUM_LINES; i++) {
+            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, perimeter_length);
+            float dist_to_line = abs(perimeter_pos * perimeter_length - line_pos);
+            dist_to_line = min(dist_to_line, abs(dist_to_line - perimeter_length));
+            
+            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
+            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
+            line_intensity = max(line_intensity, trail_intensity);
+            
+            vec3 glow_color = LINE_COLOR * 0.6;
+            
+            finalColor += LINE_COLOR * sharp_line * line_intensity * edge_falloff * 2.0;
+            finalColor += glow_color * soft_glow * line_intensity * edge_falloff;
+        }
+        
+        finalColor += vec3(0.3, 0.4, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
+    }
+    
+    gl_FragColor = vec4(finalColor, 1.0);
+}
+)";
+
+*/
+
+
+static const char *background_fragment_shader = R"(
+#version 100
+precision mediump float;
+uniform float u_time;
+uniform vec2 u_resolution;
+varying vec2 v_uv;
+
+// Star Nest by Pablo Roman Andrioli
+// License: MIT
+#define iterations 10
+#define formuparam 0.28
+#define volsteps 20
+#define stepsize 0.1
+#define zoom 0.800
+#define tile 0.850
+#define speed 0.01
+#define brightness 0.0005
+#define darkmatter 0.900
+#define distfading 0.630
+#define saturation 1.90
+
+// TRON-STYLE EDGE CONFIGURATION
+#define LINE_WIDTH 0.008
+#define LINE_LENGTH 0.12
+#define GLOW_WIDTH 0.55
+#define ANIMATION_SPEED 0.2
+#define BASE_EDGE_GLOW 0.5
+#define NUM_LINES 12
+#define EDGE_MARGIN 0.0
+
+// LINE COLOR - Blue
+#define LINE_COLOR vec3(0.0, 0.5, 1.0)
+
+// NEW TRON ELEMENTS
+#define GRID_SIZE 0.05
+#define GRID_WIDTH 0.001
+#define GRID_GLOW 0.15
+#define SCANLINE_SPEED 0.3
+#define HEX_GLOW 0.2
+#define PI 3.14159265359
+
+float distanceToEdge(vec2 uv, vec2 resolution) {
+    vec2 pixel_pos = uv * resolution;
+    float dist_left = pixel_pos.x - EDGE_MARGIN;
+    float dist_right = resolution.x - EDGE_MARGIN - pixel_pos.x;
+    float dist_bottom = pixel_pos.y - EDGE_MARGIN;
+    float dist_top = resolution.y - EDGE_MARGIN - pixel_pos.y;
+    return min(min(dist_left, dist_right), min(dist_bottom, dist_top)) / resolution.x;
+}
+
+
+
+float uvToPerimeter(vec2 uv, vec2 resolution) {
+    vec2 pixel_pos = uv * resolution;
+    vec2 margin = vec2(EDGE_MARGIN);
+    vec2 inner_size = resolution - 2.0 * margin;
+    vec2 p = (pixel_pos - margin) / inner_size.x;
+    
+    float dist_left = p.x;
+    float dist_right = (inner_size.x / inner_size.x) - p.x;
+    float dist_bottom = p.y * (inner_size.y / inner_size.x);
+    float dist_top = (inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x);
+    
+    float edge_dist = min(min(dist_left, dist_right), min(dist_bottom, dist_top));
+    float perimeter_length = 2.0 * (1.0 + inner_size.y / inner_size.x);
+    
+    if (edge_dist == dist_bottom) {
+        return p.x / perimeter_length;
+    } else if (edge_dist == dist_right) {
+        return (1.0 + p.y * (inner_size.y / inner_size.x)) / perimeter_length;
+    } else if (edge_dist == dist_top) {
+        return (1.0 + (inner_size.y / inner_size.x) + (1.0 - p.x)) / perimeter_length;
+    } else {
+        return (2.0 + (inner_size.y / inner_size.x) + ((inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x))) / perimeter_length;
+    }
+}
+
+// Rotation
+vec2 rotate2D(vec2 p, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+// Grid pattern
+float grid(vec2 uv) {
+    vec2 grid_uv = fract(uv / GRID_SIZE);
+    vec2 grid_line = smoothstep(GRID_WIDTH, 0.0, abs(grid_uv - 0.5) - 0.5 + GRID_WIDTH);
+    return max(grid_line.x, grid_line.y);
+}
+
+// Hexagon shape
+float hexagon(vec2 p, float r) {
+    vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
+    p = abs(p);
+    p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+    p -= vec2(clamp(p.x, -k.z * r, k.z * r), r);
+    return length(p) * sign(p.y);
+}
+
+// Spinning hexagon with glow
+vec3 spinningHexagon(vec2 uv, vec2 center, float size, float atime, float aspeed) {
+    vec2 p = uv - center;
+    p = rotate2D(p, atime * aspeed);
+    
+    float d = hexagon(p, size);
+    float outline = smoothstep(0.003, 0.0, abs(d));
+    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3;
+    
+    return LINE_COLOR * (outline + glow);
+}
+// Pinwheel/Turbine shape - matches the uploaded logo with dual-lip blades
+// Pinwheel/Turbine shape - matches the uploaded logo with dual-lip blades
+vec3 pinwheel(vec2 uv, vec2 center, float size, float atime, float aspeed) {
+    vec2 p = uv - center;
+    p = rotate2D(p, atime * aspeed);
+    
+    float angle = atan(p.y, p.x);
+    float dist = length(p);
+    
+    vec3 color = vec3(0.0);
+    
+    // Define colors for each blade
+    vec3 red = vec3(0.9, 0.15, 0.1);
+    vec3 yellow = vec3(1.0, 0.95, 0.2);
+    vec3 orange = vec3(1.0, 0.45, 0.0);
+    
+    // Create 6 curved blades with alternating colors
+    for (int i = 0; i < 6; i++) {
+        float blade_angle = float(i) * PI / 3.0;
+        float angle_diff = angle - blade_angle;
+        
+        // Normalize angle difference to -PI to PI
+        angle_diff = mod(angle_diff + PI, 2.0 * PI) - PI;
+        
+        // Create smooth S-curve
+        float normalized_dist = dist / size;
+        
+        // Primary curve
+        float curve = -1.2 * sin(normalized_dist * 2.8 + 0.5) * normalized_dist;
+        
+        // Base blade width that WIDENS toward the tip
+        float width_curve = sin(normalized_dist * PI);
+        
+        // Blade gets wider as it extends outward (from 0.6 to tip)
+        float widening = 1.0;
+        if (normalized_dist > 0.6) {
+            widening = 1.0 + ((normalized_dist - 0.6) / 0.4) * 0.8; // Gets up to 1.8x wider
+        }
+        
+        // Add edge dips - creates narrowing at start
+        float edge_dip_start = smoothstep(0.0, 0.1, normalized_dist);
+        
+        // Create the center notch at the outer edge (creating two lips)
+       // Create the dual-lip notch at the outer edge
+        float notch = 0.0;
+        if (normalized_dist > 0.75) {
+            // Position along the outer portion of the blade
+            float outer_progress = (normalized_dist - 0.75) / 0.25;
+            
+            // Distance from center line of blade
+            float lateral_dist = abs(angle_diff - curve);
+            
+            // Create two "lips" - one on each side of center
+            // The notch is deepest slightly off-center on each side
+            float lip_left = smoothstep(0.01, 0.12, lateral_dist) * smoothstep(0.20, 0.15, lateral_dist);
+            float lip_right = smoothstep(0.01, 0.12, lateral_dist) * smoothstep(0.20, 0.15, lateral_dist);
+            
+            // Combine lips to create the dual-notch effect
+            // Stronger near the tip
+            notch = (lip_left + lip_right) * outer_progress * 0.35;
+        }
+        
+        // Combine base width with widening, edge dips, and center notch
+        float blade_width = (0.25 + width_curve * 0.25) * widening * (0.5 + edge_dip_start * 0.5) * (1.0 - notch);
+        
+        float blade_dist = abs(angle_diff - curve);
+        
+        // Sharper blade edges
+        float blade_mask = 1.0 - smoothstep(blade_width * 0.5, blade_width, blade_dist);
+        
+        // Better radial falloff
+        float inner_radius = 0.05;
+        float outer_radius = 1.05;
+        
+        float outer_fade = smoothstep(outer_radius, outer_radius - 0.15, normalized_dist);
+        float inner_fade = 1.0 - smoothstep(inner_radius + 0.08, inner_radius, normalized_dist);
+        
+        float radial_mask = outer_fade * inner_fade;
+        
+        // Assign colors: red, orange, yellow pattern
+        vec3 blade_color;
+        int color_index = int(mod(float(i), 3.0));
+        if (color_index == 0) {
+            blade_color = red;
+        } else if (color_index == 1) {
+            blade_color = orange;
+        } else {
+            blade_color = yellow;
+        }
+        
+        // Apply blade color with intensity boost
+        color += blade_color * blade_mask * radial_mask * 1.1;
+    }
+    
+    // Add blue hexagonal outer border
+    float hex_d = hexagon(p, size * 1.15);
+    float hex_outline = smoothstep(0.005, 0.0, abs(hex_d));
+    float hex_glow = smoothstep(0.01, 0.0, abs(hex_d)) * 0.3;
+    color += LINE_COLOR * (hex_outline * 2.0 + hex_glow);
+    
+    return color;
+}
+// Triangle shape
+float triangle(vec2 p, float r) {
+    float k = sqrt(3.0);
+    p.x = abs(p.x) - r;
+    p.y = p.y + r / k;
+    if (p.x + k * p.y > 0.0) {
+        p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0;
+    }
+    p.x -= clamp(p.x, -2.0 * r, 0.0);
+    return -length(p) * sign(p.y);
+}
+
+// Rotating triangle
+vec3 rotatingTriangle(vec2 uv, vec2 center, float size, float atime, float aspeed) {
+    vec2 p = uv - center;
+    p = rotate2D(p, atime * aspeed);
+    
+    float d = triangle(p, size);
+    float outline = smoothstep(0.003, 0.0, abs(d));
+    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3;
+    
+    return LINE_COLOR * (outline + glow);
+}
+
+// Pulsing hexagon
+vec3 pulsingHexagon(vec2 uv, vec2 center, float baseSize, float atime, float aspeed) {
+    vec2 p = uv - center;
+    float pulse = sin(atime * aspeed) * 0.5 + 0.5;
+    float size = baseSize * (0.7 + pulse * 0.3);
+    
+    float d = hexagon(p, size);
+    float outline = smoothstep(0.003, 0.0, abs(d));
+    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3 * pulse;
+    
+    return LINE_COLOR * (outline + glow * 2.0);
+}
+
+// Orbiting shapes - unrolled
+vec3 orbitingShapes(vec2 uv, vec2 center, float atime) {
+    vec3 color = vec3(0.0);
+    float orbitRadius = 0.15;
+    
+    float angle0 = atime * 0.5 + 0.0 * PI * 2.0 / 3.0;
+    vec2 orbitPos0 = center + vec2(cos(angle0), sin(angle0)) * orbitRadius;
+    vec2 p0 = uv - orbitPos0;
+    float d0 = length(p0) - 0.015;
+    float outline0 = smoothstep(0.002, 0.0, abs(d0));
+    float glow0 = smoothstep(0.02, 0.0, abs(d0)) * 0.5;
+    color += LINE_COLOR * (outline0 + glow0);
+    
+    float angle1 = atime * 0.5 + 1.0 * PI * 2.0 / 3.0;
+    vec2 orbitPos1 = center + vec2(cos(angle1), sin(angle1)) * orbitRadius;
+    vec2 p1 = uv - orbitPos1;
+    float d1 = length(p1) - 0.015;
+    float outline1 = smoothstep(0.002, 0.0, abs(d1));
+    float glow1 = smoothstep(0.02, 0.0, abs(d1)) * 0.5;
+    color += LINE_COLOR * (outline1 + glow1);
+    
+    float angle2 = atime * 0.5 + 2.0 * PI * 2.0 / 3.0;
+    vec2 orbitPos2 = center + vec2(cos(angle2), sin(angle2)) * orbitRadius;
+    vec2 p2 = uv - orbitPos2;
+    float d2 = length(p2) - 0.015;
+    float outline2 = smoothstep(0.002, 0.0, abs(d2));
+    float glow2 = smoothstep(0.02, 0.0, abs(d2)) * 0.5;
+    color += LINE_COLOR * (outline2 + glow2);
+    
+    return color;
+}
+
+// Scanlines
+float scanlines(vec2 uv, float atime) {
+    float line = sin((uv.y + atime * SCANLINE_SPEED) * 200.0);
+    return smoothstep(0.9, 1.0, line);
+}
+
+// Helper function: signed distance to line segment
+float sdSegment(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+
+// W symbol with glowing blue effect
+vec3 letter_W(vec2 uv, vec2 center, float size) {
+    vec2 p = (uv - center) / size;
+    
+    vec3 color = vec3(0.0);
+    
+    // Define the W shape using line segments
+    // W has 4 diagonal strokes forming the letter
+    float line_width = 0.08;
+    float glow_width = 0.15;
+    
+    // Left outer stroke (top-left to bottom-middle-left)
+    vec2 p1_start = vec2(-0.5, 0.5);
+    vec2 p1_end = vec2(-0.25, -0.5);
+    float d1 = sdSegment(p, p1_start, p1_end);
+    
+    // Left inner stroke (bottom-middle-left to top-middle)
+    vec2 p2_start = vec2(-0.25, -0.5);
+    vec2 p2_end = vec2(0.0, 0.2);
+    float d2 = sdSegment(p, p2_start, p2_end);
+    
+    // Right inner stroke (top-middle to bottom-middle-right)
+    vec2 p3_start = vec2(0.0, 0.2);
+    vec2 p3_end = vec2(0.25, -0.5);
+    float d3 = sdSegment(p, p3_start, p3_end);
+    
+    // Right outer stroke (bottom-middle-right to top-right)
+    vec2 p4_start = vec2(0.25, -0.5);
+    vec2 p4_end = vec2(0.5, 0.5);
+    float d4 = sdSegment(p, p4_start, p4_end);
+    
+    // Combine all strokes
+    float d = min(min(d1, d2), min(d3, d4));
+    
+    // Create the main line
+    float line = smoothstep(line_width, line_width * 0.5, d);
+    
+    // Create the glow
+    float glow = smoothstep(glow_width, 0.0, d) * 0.5;
+    
+    // Apply blue color
+    color = LINE_COLOR * (line * 2.0 + glow);
+    
+    return color;
+}
+
+// A symbol with glowing blue effect
+vec3 letter_A(vec2 uv, vec2 center, float size) {
+    vec2 p = (uv - center) / size;
+    
+    vec3 color = vec3(0.0);
+    
+    // Define the A shape using line segments
+    float line_width = 0.08;
+    float glow_width = 0.15;
+    
+    // Left stroke (bottom-left to top-center)
+    vec2 p1_start = vec2(-0.4, -0.5);
+    vec2 p1_end = vec2(0.0, 0.5);
+    float d1 = sdSegment(p, p1_start, p1_end);
+    
+    // Right stroke (top-center to bottom-right)
+    vec2 p2_start = vec2(0.0, 0.5);
+    vec2 p2_end = vec2(0.4, -0.5);
+    float d2 = sdSegment(p, p2_start, p2_end);
+    
+    // Horizontal crossbar (middle of both strokes)
+    vec2 p3_start = vec2(-0.2, 0.0);
+    vec2 p3_end = vec2(0.2, 0.0);
+    float d3 = sdSegment(p, p3_start, p3_end);
+    
+    // Combine all strokes
+    float d = min(min(d1, d2), d3);
+    
+    // Create the main line
+    float line = smoothstep(line_width, line_width * 0.5, d);
+    
+    // Create the glow
+    float glow = smoothstep(glow_width, 0.0, d) * 0.5;
+    
+    // Apply blue color
+    color = LINE_COLOR * (line * 2.0 + glow);
+    
+    return color;
+}
+
+// Y symbol with glowing blue effect
+vec3 letter_Y(vec2 uv, vec2 center, float size) {
+    vec2 p = (uv - center) / size;
+    
+    vec3 color = vec3(0.0);
+    
+    // Define the Y shape using line segments
+    float line_width = 0.08;
+    float glow_width = 0.15;
+    
+    // Left stroke (top-left to center)
+    vec2 p1_start = vec2(-0.4, 0.5);
+    vec2 p1_end = vec2(0.0, 0.0);
+    float d1 = sdSegment(p, p1_start, p1_end);
+    
+    // Right stroke (top-right to center)
+    vec2 p2_start = vec2(0.4, 0.5);
+    vec2 p2_end = vec2(0.0, 0.0);
+    float d2 = sdSegment(p, p2_start, p2_end);
+    
+    // Vertical stem (center to bottom)
+    vec2 p3_start = vec2(0.0, 0.0);
+    vec2 p3_end = vec2(0.0, -0.5);
+    float d3 = sdSegment(p, p3_start, p3_end);
+    
+    // Combine all strokes
+    float d = min(min(d1, d2), d3);
+    
+    // Create the main line
+    float line = smoothstep(line_width, line_width * 0.5, d);
+    
+    // Create the glow
+    float glow = smoothstep(glow_width, 0.0, d) * 0.5;
+    
+    // Apply blue color
+    color = LINE_COLOR * (line * 2.0 + glow);
+    
+    return color;
+}
+
+// F symbol with glowing blue effect
+// F symbol with glowing blue effect (flipped)
+vec3 letter_F(vec2 uv, vec2 center, float size) {
+    vec2 p = (uv - center) / size;
+    
+    vec3 color = vec3(0.0);
+    
+    // Define the F shape using line segments
+    float line_width = 0.08;
+    float glow_width = 0.15;
+    
+    // Vertical stroke (bottom to top)
+    vec2 p1_start = vec2(0.3, -0.5);
+    vec2 p1_end = vec2(0.3, 0.5);
+    float d1 = sdSegment(p, p1_start, p1_end);
+    
+    // Top horizontal stroke (right to left)
+    vec2 p2_start = vec2(0.3, 0.5);
+    vec2 p2_end = vec2(-0.3, 0.5);
+    float d2 = sdSegment(p, p2_start, p2_end);
+    
+    // Middle horizontal stroke (right to left, shorter)
+    vec2 p3_start = vec2(0.3, 0.05);
+    vec2 p3_end = vec2(-0.2, 0.05);
+    float d3 = sdSegment(p, p3_start, p3_end);
+    
+    // Combine all strokes
+    float d = min(min(d1, d2), d3);
+    
+    // Create the main line
+    float line = smoothstep(line_width, line_width * 0.5, d);
+    
+    // Create the glow
+    float glow = smoothstep(glow_width, 0.0, d) * 0.5;
+    
+    // Apply blue color
+    color = LINE_COLOR * (line * 2.0 + glow);
+    
+    return color;
+}
+
+// I symbol with glowing blue effect
+vec3 letter_I(vec2 uv, vec2 center, float size) {
+    vec2 p = (uv - center) / size;
+    
+    vec3 color = vec3(0.0);
+    
+    // Define the I shape using line segments
+    float line_width = 0.08;
+    float glow_width = 0.15;
+    
+    // Vertical stroke (bottom to top)
+    vec2 p1_start = vec2(0.0, -0.5);
+    vec2 p1_end = vec2(0.0, 0.5);
+    float d1 = sdSegment(p, p1_start, p1_end);
+    
+    // Top horizontal stroke (serif)
+    vec2 p2_start = vec2(-0.25, 0.5);
+    vec2 p2_end = vec2(0.25, 0.5);
+    float d2 = sdSegment(p, p2_start, p2_end);
+    
+    // Bottom horizontal stroke (serif)
+    vec2 p3_start = vec2(-0.25, -0.5);
+    vec2 p3_end = vec2(0.25, -0.5);
+    float d3 = sdSegment(p, p3_start, p3_end);
+    
+    // Combine all strokes
+    float d = min(min(d1, d2), d3);
+    
+    // Create the main line
+    float line = smoothstep(line_width, line_width * 0.5, d);
+    
+    // Create the glow
+    float glow = smoothstep(glow_width, 0.0, d) * 0.5;
+    
+    // Apply blue color
+    color = LINE_COLOR * (line * 2.0 + glow);
+    
+    return color;
+}
+
+// R symbol with glowing blue effect (flipped)
+vec3 letter_R(vec2 uv, vec2 center, float size) {
+    vec2 p = (uv - center) / size;
+    
+    vec3 color = vec3(0.0);
+    
+    // Define the R shape using line segments
+    float line_width = 0.08;
+    float glow_width = 0.15;
+    
+    // Vertical stroke (bottom to top)
+    vec2 p1_start = vec2(0.3, -0.5);
+    vec2 p1_end = vec2(0.3, 0.5);
+    float d1 = sdSegment(p, p1_start, p1_end);
+    
+    // Top horizontal stroke
+    vec2 p2_start = vec2(0.3, 0.5);
+    vec2 p2_end = vec2(-0.25, 0.5);
+    float d2 = sdSegment(p, p2_start, p2_end);
+    
+    // Left vertical stroke (top bowl)
+    vec2 p3_start = vec2(-0.25, 0.5);
+    vec2 p3_end = vec2(-0.25, 0.05);
+    float d3 = sdSegment(p, p3_start, p3_end);
+    
+    // Middle horizontal stroke (bottom of bowl)
+    vec2 p4_start = vec2(-0.25, 0.05);
+    vec2 p4_end = vec2(0.3, 0.05);
+    float d4 = sdSegment(p, p4_start, p4_end);
+    
+    // Diagonal leg (middle to bottom-left)
+    vec2 p5_start = vec2(0.05, 0.05);
+    vec2 p5_end = vec2(-0.3, -0.5);
+    float d5 = sdSegment(p, p5_start, p5_end);
+    
+    // Combine all strokes
+    float d = min(min(min(d1, d2), min(d3, d4)), d5);
+    
+    // Create the main line
+    float line = smoothstep(line_width, line_width * 0.5, d);
+    
+    // Create the glow
+    float glow = smoothstep(glow_width, 0.0, d) * 0.5;
+    
+    // Apply blue color
+    color = LINE_COLOR * (line * 2.0 + glow);
+    
+    return color;
+}
+
+// E symbol with glowing blue effect
+vec3 letter_E(vec2 uv, vec2 center, float size) {
+    vec2 p = (uv - center) / size;
+    
+    vec3 color = vec3(0.0);
+    
+    // Define the E shape using line segments
+    float line_width = 0.08;
+    float glow_width = 0.15;
+    
+    // Vertical stroke (bottom to top)
+    vec2 p1_start = vec2(0.3, -0.5);
+    vec2 p1_end = vec2(0.3, 0.5);
+    float d1 = sdSegment(p, p1_start, p1_end);
+    
+    // Top horizontal stroke (right to left)
+    vec2 p2_start = vec2(0.3, 0.5);
+    vec2 p2_end = vec2(-0.3, 0.5);
+    float d2 = sdSegment(p, p2_start, p2_end);
+    
+    // Middle horizontal stroke (right to left)
+    vec2 p3_start = vec2(0.3, 0.0);
+    vec2 p3_end = vec2(-0.2, 0.0);
+    float d3 = sdSegment(p, p3_start, p3_end);
+    
+    // Bottom horizontal stroke (right to left)
+    vec2 p4_start = vec2(0.3, -0.5);
+    vec2 p4_end = vec2(-0.3, -0.5);
+    float d4 = sdSegment(p, p4_start, p4_end);
+    
+    // Combine all strokes
+    float d = min(min(d1, d2), min(d3, d4));
+    
+    // Create the main line
+    float line = smoothstep(line_width, line_width * 0.5, d);
+    
+    // Create the glow
+    float glow = smoothstep(glow_width, 0.0, d) * 0.5;
+    
+    // Apply blue color
+    color = LINE_COLOR * (line * 2.0 + glow);
+    
+    return color;
+}
+
+void main() {
+    // STAR NEST BACKGROUND
+    vec2 uv = v_uv - 0.5;
+    uv.y *= u_resolution.y / u_resolution.x;
+    vec3 dir = vec3(uv * zoom, 1.0);
+    
+    float time = u_time * speed + 0.25;
+    
+    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
+    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
+    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
+    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
+    dir.xz *= rot1;
+    dir.xy *= rot2;
+    
+    vec3 from = vec3(1.0, 0.5, 0.5);
+    from += vec3(time * 2.0, time, -2.0);
+    from.xz *= rot1;
+    from.xy *= rot2;
+    
+    float s = 0.1;
+    float fade = 1.0;
+    vec3 v = vec3(0.0);
+    
+    for (int r = 0; r < volsteps; r++) {
+        vec3 p = from + s * dir * 10.5;
+        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0)));
+        
+        float pa = 0.0;
+        float a = 0.0;
+        for (int i = 0; i < iterations; i++) { 
+            p = abs(p) / dot(p, p) - formuparam;
+            a += abs(length(p) - pa);
+            pa = length(p);
+        }
+        
+        float dm = max(0.0, darkmatter - a * a * 0.1);
+        a *= a * a;
+        
+        fade *= 1.0 - dm;
+        v += fade;
+        v += vec3(s, s * s, s * s * s) * a * brightness * fade;
+        fade *= distfading;
+        s += stepsize;
+    }
+    
+    v = mix(vec3(length(v)), v, saturation);
+    vec3 finalColor = v * 0.01;
+    
+    // NEW TRON ELEMENTS
+    vec2 centered_uv = v_uv - 0.5;
+    centered_uv.y *= u_resolution.y / u_resolution.x;
+    
+    // Add subtle grid
+    float gridPattern = grid(centered_uv * 5.0);
+    finalColor += LINE_COLOR * gridPattern * GRID_GLOW * 0.3;
+    
+    // Add horizontal scanlines
+    float scan = scanlines(v_uv, u_time);
+    finalColor += vec3(0.0, 0.3, 0.6) * scan * 0.15;
+    
+    // Add vertical accent lines (sparse)
+    float verticalLines = smoothstep(0.002, 0.0, abs(fract(v_uv.x * 8.0) - 0.5));
+    finalColor += LINE_COLOR * verticalLines * 0.2 * sin(u_time * 0.5 + v_uv.x * 10.0) * 0.5;
+    
+    // ANIMATED SHAPES - Multiple spinning hexagons
+   /* finalColor += spinningHexagon(centered_uv, vec2(-0.3, 0.2), 0.08, u_time, 1.0);
+    finalColor += spinningHexagon(centered_uv, vec2(0.35, -0.15), 0.06, u_time, -1.5);
+    finalColor += spinningHexagon(centered_uv, vec2(-0.25, -0.25), 0.05, u_time, 0.8);
+    finalColor += spinningHexagon(centered_uv, vec2(0.2, 0.25), 0.07, u_time, -1.2);
+    */
+    // CENTER PINWHEEL (replaces rotating ring)
+    finalColor += pinwheel(centered_uv, vec2(0.0, 0.0), 0.04, u_time, 0.6);
+ 
+vec3 w_symbol = letter_W(uv, vec2(-0.2, 0.0), -0.05); // position at (0.5, 0.3), size 0.15
+finalColor += w_symbol;
+
+vec3 a_symbol = letter_A(uv, vec2(-0.15, 0.0), -0.05);
+finalColor += a_symbol;
+ 
+// Add this where you want to render the Y symbol
+vec3 y_symbol = letter_Y(uv, vec2(-0.1,  0.0), -0.05);// position at (0.9, 0.3), size 0.15
+finalColor += y_symbol;
+
+vec3 f_symbol = letter_F(uv,  vec2(0.1,  0.0), -0.05);
+finalColor += f_symbol;
+
+vec3 i_symbol = letter_I(uv,  vec2(0.15,  0.0), -0.05);
+finalColor += i_symbol;
+
+vec3 r_symbol = letter_R(uv, vec2(0.2,  0.0), -0.05);
+finalColor += r_symbol;
+
+vec3 e_symbol = letter_E(uv, vec2(0.25,  0.0), -0.05);
+finalColor += e_symbol;
+    // Rotating triangles
+//    finalColor += rotatingTriangle(centered_uv, vec2(-0.35, -0.05), 0.06, u_time, -1.0);
+//    finalColor += rotatingTriangle(centered_uv, vec2(0.15, -0.3), 0.05, u_time, 1.3);
+    
+    // Pulsing hexagons
+//    finalColor += pulsingHexagon(centered_uv, vec2(-0.15, 0.15), 0.055, u_time, 2.0);
+  //  finalColor += pulsingHexagon(centered_uv, vec2(0.3, 0.0), 0.045, u_time, 2.5);
+    
+    // Orbiting small shapes around center
+   // finalColor += orbitingShapes(centered_uv, vec2(0.0, 0.0), u_time);
+    
+    // TRON TRAVELING LINES OVERLAY (Original)
+    float edge_dist = distanceToEdge(v_uv, u_resolution);
+    
+    if (edge_dist < 0.05 && edge_dist > 0.0) {
+        float perimeter_pos = uvToPerimeter(v_uv, u_resolution);
+        float perimeter_length = 2.0 * (1.0 + (u_resolution.y - 2.0 * EDGE_MARGIN) / (u_resolution.x - 2.0 * EDGE_MARGIN));
+        float spacing = perimeter_length / float(NUM_LINES);
+        
+        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
+        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
+        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
+        
+        for (int i = 0; i < NUM_LINES; i++) {
+            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, perimeter_length);
+            float dist_to_line = abs(perimeter_pos * perimeter_length - line_pos);
+            dist_to_line = min(dist_to_line, abs(dist_to_line - perimeter_length));
+            
+            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
+            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
+            line_intensity = max(line_intensity, trail_intensity);
+            
+            vec3 glow_color = LINE_COLOR * 0.6;
+            
+            finalColor += LINE_COLOR * sharp_line * line_intensity * edge_falloff * 2.0;
+            finalColor += glow_color * soft_glow * line_intensity * edge_falloff;
+        }
+        
+        finalColor += vec3(0.3, 0.4, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
+    }
+    
+    gl_FragColor = vec4(finalColor, 1.0);
+}
+)";
+/*
+static const char *background_fragment_shader = R"(
+#version 100
+precision mediump float;
+uniform float u_time;
+uniform vec2 u_resolution;
+varying vec2 v_uv;
+
+// Star Nest by Pablo Roman Andrioli
+// License: MIT
+#define iterations 8
+#define formuparam 0.48
+#define volsteps 20
+#define stepsize 0.1
+#define zoom 0.800
+#define tile 0.850
+#define speed 0.01
+#define brightness 0.0005
+#define darkmatter 0.900
+#define distfading 0.630
+#define saturation 1.90
+
+// TRON-STYLE EDGE CONFIGURATION
+#define LINE_WIDTH 0.008
+#define LINE_LENGTH 0.12
+#define GLOW_WIDTH 0.55
+#define ANIMATION_SPEED 0.2
+#define BASE_EDGE_GLOW 0.5
+#define NUM_LINES 12
+#define EDGE_MARGIN 0.0
+
+// LINE COLOR - Blue
+#define LINE_COLOR vec3(0.0, 0.5, 1.0)
+
+// NEW TRON ELEMENTS
+#define GRID_SIZE 0.05
+#define GRID_WIDTH 0.001
+#define GRID_GLOW 0.15
+#define SCANLINE_SPEED 0.3
+#define SCANLINE_WIDTH 0.002
+#define HEX_SIZE 0.08
+#define HEX_GLOW 0.2
+
+float distanceToEdge(vec2 uv, vec2 resolution) {
+    vec2 pixel_pos = uv * resolution;
+    float dist_left = pixel_pos.x - EDGE_MARGIN;
+    float dist_right = resolution.x - EDGE_MARGIN - pixel_pos.x;
+    float dist_bottom = pixel_pos.y - EDGE_MARGIN;
+    float dist_top = resolution.y - EDGE_MARGIN - pixel_pos.y;
+    return min(min(dist_left, dist_right), min(dist_bottom, dist_top)) / resolution.x;
+}
+
+float uvToPerimeter(vec2 uv, vec2 resolution) {
+    vec2 pixel_pos = uv * resolution;
+    vec2 margin = vec2(EDGE_MARGIN);
+    vec2 inner_size = resolution - 2.0 * margin;
+    vec2 p = (pixel_pos - margin) / inner_size.x;
+    
+    float dist_left = p.x;
+    float dist_right = (inner_size.x / inner_size.x) - p.x;
+    float dist_bottom = p.y * (inner_size.y / inner_size.x);
+    float dist_top = (inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x);
+    
+    float edge_dist = min(min(dist_left, dist_right), min(dist_bottom, dist_top));
+    float perimeter_length = 2.0 * (1.0 + inner_size.y / inner_size.x);
+    
+    if (edge_dist == dist_bottom) {
+        return p.x / perimeter_length;
+    } else if (edge_dist == dist_right) {
+        return (1.0 + p.y * (inner_size.y / inner_size.x)) / perimeter_length;
+    } else if (edge_dist == dist_top) {
+        return (1.0 + (inner_size.y / inner_size.x) + (1.0 - p.x)) / perimeter_length;
+    } else {
+        return (2.0 + (inner_size.y / inner_size.x) + ((inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x))) / perimeter_length;
+    }
+}
+
+// Grid pattern
+float grid(vec2 uv) {
+    vec2 grid_uv = fract(uv / GRID_SIZE);
+    vec2 grid_line = smoothstep(GRID_WIDTH, 0.0, abs(grid_uv - 0.5) - 0.5 + GRID_WIDTH);
+    return max(grid_line.x, grid_line.y);
+}
+
+// Hexagonal grid pattern
+float hexDist(vec2 p) {
+    p = abs(p);
+    float c = dot(p, normalize(vec2(1.0, 1.732)));
+    c = max(c, p.x);
+    return c;
+}
+
+float hexPattern(vec2 uv) {
+    vec2 r = vec2(1.0, 1.732);
+    vec2 h = r * 0.5;
+    vec2 a = mod(uv, r) - h;
+    vec2 b = mod(uv - h, r) - h;
+    
+    vec2 gv = length(a) < length(b) ? a : b;
+    float dist = hexDist(gv);
+    float hex = smoothstep(HEX_SIZE, HEX_SIZE - 0.01, dist);
+    float hexEdge = smoothstep(HEX_SIZE - 0.005, HEX_SIZE - 0.015, dist);
+    return hexEdge - hex * 0.5;
+}
+
+// Scanlines
+float scanlines(vec2 uv, float time) {
+    float line = sin((uv.y + time * SCANLINE_SPEED) * 200.0);
+    return smoothstep(0.9, 1.0, line);
+}
+
+void main() {
+    // STAR NEST BACKGROUND
+    vec2 uv = v_uv - 0.5;
+    uv.y *= u_resolution.y / u_resolution.x;
+    vec3 dir = vec3(uv * zoom, 1.0);
+    
+    float time = u_time * speed + 0.25;
+    
+    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
+    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
+    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
+    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
+    dir.xz *= rot1;
+    dir.xy *= rot2;
+    
+    vec3 from = vec3(1.0, 0.5, 0.5);
+    from += vec3(time * 2.0, time, -2.0);
+    from.xz *= rot1;
+    from.xy *= rot2;
+    
+    float s = 0.1;
+    float fade = 1.0;
+    vec3 v = vec3(0.0);
+    
+    for (int r = 0; r < volsteps; r++) {
+        vec3 p = from + s * dir * 10.5;
+        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0)));
+        
+        float pa = 0.0;
+        float a = 0.0;
+        for (int i = 0; i < iterations; i++) { 
+            p = abs(p) / dot(p, p) - formuparam;
+            a += abs(length(p) - pa);
+            pa = length(p);
+        }
+        
+        float dm = max(0.0, darkmatter - a * a * 0.1);
+        a *= a * a;
+        
+        fade *= 1.0 - dm;
+        v += fade;
+        v += vec3(s, s * s, s * s * s) * a * brightness * fade;
+        fade *= distfading;
+        s += stepsize;
+    }
+    
+    v = mix(vec3(length(v)), v, saturation);
+    vec3 finalColor = v * 0.01;
+    
+    // NEW TRON ELEMENTS
+    vec2 centered_uv = v_uv - 0.5;
+    centered_uv.y *= u_resolution.y / u_resolution.x;
+    
+    // Add subtle grid
+    float gridPattern = grid(centered_uv * 5.0);
+    finalColor += LINE_COLOR * gridPattern * GRID_GLOW * 0.3;
+    
+    // Add hexagonal pattern (subtle, in center area)
+    float centerDist = length(centered_uv);
+    float hexFade = smoothstep(0.5, 0.2, centerDist);
+    float hexPat = hexPattern(centered_uv * 8.0);
+    finalColor += LINE_COLOR * hexPat * HEX_GLOW * hexFade * 0.4;
+    
+    // Add horizontal scanlines
+    float scan = scanlines(v_uv, u_time);
+    finalColor += vec3(0.0, 0.3, 0.6) * scan * 0.15;
+    
+    // Add vertical accent lines (sparse)
+    float verticalLines = smoothstep(0.002, 0.0, abs(fract(v_uv.x * 8.0) - 0.5));
+    finalColor += LINE_COLOR * verticalLines * 0.2 * sin(u_time * 0.5 + v_uv.x * 10.0) * 0.5;
+    
+    // TRON TRAVELING LINES OVERLAY (Original)
+    float edge_dist = distanceToEdge(v_uv, u_resolution);
+    
+    if (edge_dist < 0.05 && edge_dist > 0.0) {
+        float perimeter_pos = uvToPerimeter(v_uv, u_resolution);
+        float perimeter_length = 2.0 * (1.0 + (u_resolution.y - 2.0 * EDGE_MARGIN) / (u_resolution.x - 2.0 * EDGE_MARGIN));
+        float spacing = perimeter_length / float(NUM_LINES);
+        
+        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
+        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
+        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
+        
+        for (int i = 0; i < NUM_LINES; i++) {
+            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, perimeter_length);
+            float dist_to_line = abs(perimeter_pos * perimeter_length - line_pos);
+            dist_to_line = min(dist_to_line, abs(dist_to_line - perimeter_length));
+            
+            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
+            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
+            line_intensity = max(line_intensity, trail_intensity);
+            
+            vec3 glow_color = LINE_COLOR * 0.6;
+            
+            finalColor += LINE_COLOR * sharp_line * line_intensity * edge_falloff * 2.0;
+            finalColor += glow_color * soft_glow * line_intensity * edge_falloff;
+        }
+        
+        finalColor += vec3(0.3, 0.4, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
+    }
+    
+    gl_FragColor = vec4(finalColor, 1.0);
+}
+)";*/
+
+
+//https://www.shadertoy.com/view/XlfGRj
+/*
+static const char *background_fragment_shader = R"(
+#version 100
+precision mediump float;
+uniform float u_time;
+uniform vec2 u_resolution;
+varying vec2 v_uv;
+
+// Star Nest by Pablo Roman Andrioli
+// License: MIT
+#define iterations 8
+#define formuparam 0.48
+#define volsteps 20
+#define stepsize 0.1
+#define zoom 0.800
+#define tile 0.850
+#define speed 0.01
+#define brightness 0.0005
+#define darkmatter 0.900
+#define distfading 0.630
+#define saturation 1.90
+
+// TRON-STYLE EDGE CONFIGURATION
+#define LINE_WIDTH 0.008
+#define LINE_LENGTH 0.12
+#define GLOW_WIDTH 0.55
+#define ANIMATION_SPEED 0.2
+#define BASE_EDGE_GLOW 0.5
+#define NUM_LINES 12
+#define EDGE_MARGIN 0.0  // 50 pixel margin from edges
+
+// LINE COLOR - Blue
+#define LINE_COLOR vec3(0.0, 0.5, 1.0)
+
+float distanceToEdge(vec2 uv, vec2 resolution) {
+    // Convert to pixel coordinates
+    vec2 pixel_pos = uv * resolution;
+    
+    // Calculate distances to edges with margin
+    float dist_left = pixel_pos.x - EDGE_MARGIN;
+    float dist_right = resolution.x - EDGE_MARGIN - pixel_pos.x;
+    float dist_bottom = pixel_pos.y - EDGE_MARGIN;
+    float dist_top = resolution.y - EDGE_MARGIN - pixel_pos.y;
+    
+    // Return minimum distance (normalized)
+    return min(min(dist_left, dist_right), min(dist_bottom, dist_top)) / resolution.x;
+}
+
+float uvToPerimeter(vec2 uv, vec2 resolution) {
+    vec2 pixel_pos = uv * resolution;
+    vec2 margin = vec2(EDGE_MARGIN);
+    vec2 inner_size = resolution - 2.0 * margin;
+    
+    // Adjust UV to inner rectangle
+    vec2 p = (pixel_pos - margin) / inner_size.x;  // Normalize to inner rect
+    
+    float dist_left = p.x;
+    float dist_right = (inner_size.x / inner_size.x) - p.x;
+    float dist_bottom = p.y * (inner_size.y / inner_size.x);
+    float dist_top = (inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x);
+    
+    float edge_dist = min(min(dist_left, dist_right), min(dist_bottom, dist_top));
+    float perimeter_length = 2.0 * (1.0 + inner_size.y / inner_size.x);
+    
+    if (edge_dist == dist_bottom) {
+        return p.x / perimeter_length;  // Bottom edge
+    } else if (edge_dist == dist_right) {
+        return (1.0 + p.y * (inner_size.y / inner_size.x)) / perimeter_length;  // Right edge
+    } else if (edge_dist == dist_top) {
+        return (1.0 + (inner_size.y / inner_size.x) + (1.0 - p.x)) / perimeter_length;  // Top edge
+    } else {
+        return (2.0 + (inner_size.y / inner_size.x) + ((inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x))) / perimeter_length;  // Left edge
+    }
+}
+
+void main() {
+    // STAR NEST BACKGROUND
+    vec2 uv = v_uv - 0.5;
+    uv.y *= u_resolution.y / u_resolution.x;
+    vec3 dir = vec3(uv * zoom, 1.0);
+    
+    float time = u_time * speed + 0.25;
+    
+    // Auto-rotation
+    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
+    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
+    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
+    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
+    dir.xz *= rot1;
+    dir.xy *= rot2;
+    
+    vec3 from = vec3(1.0, 0.5, 0.5);
+    from += vec3(time * 2.0, time, -2.0);
+    from.xz *= rot1;
+    from.xy *= rot2;
+    
+    // Volumetric rendering
+    float s = 0.1;
+    float fade = 1.0;
+    vec3 v = vec3(0.0);
+    
+    for (int r = 0; r < volsteps; r++) {
+        vec3 p = from + s * dir * 10.5;
+        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0)));
+        
+        float pa = 0.0;
+        float a = 0.0;
+        for (int i = 0; i < iterations; i++) { 
+            p = abs(p) / dot(p, p) - formuparam;
+            a += abs(length(p) - pa);
+            pa = length(p);
+        }
+        
+        float dm = max(0.0, darkmatter - a * a * 0.1);
+        a *= a * a;
+        
+        fade *= 1.0 - dm;
+        v += fade;
+        v += vec3(s, s * s, s * s * s) * a * brightness * fade;
+        fade *= distfading;
+        s += stepsize;
+    }
+    
+    v = mix(vec3(length(v)), v, saturation);
+    vec3 finalColor = v * 0.01;
+    
+    // TRON TRAVELING LINES OVERLAY
+    float edge_dist = distanceToEdge(v_uv, u_resolution);
+    
+    if (edge_dist < 0.05 && edge_dist > 0.0) {
+        float perimeter_pos = uvToPerimeter(v_uv, u_resolution);
+        float perimeter_length = 2.0 * (1.0 + (u_resolution.y - 2.0 * EDGE_MARGIN) / (u_resolution.x - 2.0 * EDGE_MARGIN));
+        float spacing = perimeter_length / float(NUM_LINES);
+        
+        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
+        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
+        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
+        
+        for (int i = 0; i < NUM_LINES; i++) {
+            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, perimeter_length);
+            float dist_to_line = abs(perimeter_pos * perimeter_length - line_pos);
+            dist_to_line = min(dist_to_line, abs(dist_to_line - perimeter_length));
+            
+            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
+            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
+            line_intensity = max(line_intensity, trail_intensity);
+            
+            vec3 glow_color = LINE_COLOR * 0.6;
+            
+            finalColor += LINE_COLOR * sharp_line * line_intensity * edge_falloff * 2.0;
+            finalColor += glow_color * soft_glow * line_intensity * edge_falloff;
+        }
+        
+        // Subtle constant edge glow
+        finalColor += vec3(0.3, 0.4, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
+    }
+    
+    gl_FragColor = vec4(finalColor, 1.0);
+}
+)";*/
+
+
+
+/*static const char *background_fragment_shader = R"(
 #version 100
 precision mediump float;
 uniform float u_time;
@@ -248,7 +1710,7 @@ void main() {
    v = mix(vec3(length(v)), v, saturation); // color adjust
     gl_FragColor = vec4(v * 0.01, 1.0);
 }
-)";
+)";*/
 
 
 static const char *cursor_vertex_shader = R"(
