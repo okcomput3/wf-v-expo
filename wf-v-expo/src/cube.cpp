@@ -11,6 +11,7 @@
 #include <wayfire/plugins/common/input-grab.hpp>
 #include "wayfire/plugins/ipc/ipc-activator.hpp"
 #include <linux/input-event-codes.h>
+#include "wayfire/plugins/wobbly/wobbly-signal.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <limits>
@@ -173,348 +174,7 @@ void main() {
 }
 )";
 
-/*
-static const char *background_fragment_shader = R"(
-#version 100
-precision mediump float;
-uniform float u_time;
-uniform vec2 u_resolution;
-varying vec2 v_uv;
 
-// Star Nest by Pablo Roman Andrioli
-// License: MIT
-#define iterations 8
-#define formuparam 0.48
-#define volsteps 20
-#define stepsize 0.1
-#define zoom 0.800
-#define tile 0.850
-#define speed 0.01
-#define brightness 0.0005
-#define darkmatter 0.900
-#define distfading 0.630
-#define saturation 1.90
-
-// TRON-STYLE EDGE CONFIGURATION
-#define LINE_WIDTH 0.008
-#define LINE_LENGTH 0.12
-#define GLOW_WIDTH 0.55
-#define ANIMATION_SPEED 0.2
-#define BASE_EDGE_GLOW 0.5
-#define NUM_LINES 12
-#define EDGE_MARGIN 0.0
-
-// LINE COLOR - Blue
-#define LINE_COLOR vec3(0.0, 0.5, 1.0)
-
-// NEW TRON ELEMENTS
-#define GRID_SIZE 0.05
-#define GRID_WIDTH 0.001
-#define GRID_GLOW 0.15
-#define SCANLINE_SPEED 0.3
-#define HEX_GLOW 0.2
-#define PI 3.14159265359
-
-float distanceToEdge(vec2 uv, vec2 resolution) {
-    vec2 pixel_pos = uv * resolution;
-    float dist_left = pixel_pos.x - EDGE_MARGIN;
-    float dist_right = resolution.x - EDGE_MARGIN - pixel_pos.x;
-    float dist_bottom = pixel_pos.y - EDGE_MARGIN;
-    float dist_top = resolution.y - EDGE_MARGIN - pixel_pos.y;
-    return min(min(dist_left, dist_right), min(dist_bottom, dist_top)) / resolution.x;
-}
-
-float uvToPerimeter(vec2 uv, vec2 resolution) {
-    vec2 pixel_pos = uv * resolution;
-    vec2 margin = vec2(EDGE_MARGIN);
-    vec2 inner_size = resolution - 2.0 * margin;
-    vec2 p = (pixel_pos - margin) / inner_size.x;
-    
-    float dist_left = p.x;
-    float dist_right = (inner_size.x / inner_size.x) - p.x;
-    float dist_bottom = p.y * (inner_size.y / inner_size.x);
-    float dist_top = (inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x);
-    
-    float edge_dist = min(min(dist_left, dist_right), min(dist_bottom, dist_top));
-    float perimeter_length = 2.0 * (1.0 + inner_size.y / inner_size.x);
-    
-    if (edge_dist == dist_bottom) {
-        return p.x / perimeter_length;
-    } else if (edge_dist == dist_right) {
-        return (1.0 + p.y * (inner_size.y / inner_size.x)) / perimeter_length;
-    } else if (edge_dist == dist_top) {
-        return (1.0 + (inner_size.y / inner_size.x) + (1.0 - p.x)) / perimeter_length;
-    } else {
-        return (2.0 + (inner_size.y / inner_size.x) + ((inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x))) / perimeter_length;
-    }
-}
-
-// Rotation
-vec2 rotate2D(vec2 p, float angle) {
-    float c = cos(angle);
-    float s = sin(angle);
-    return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
-}
-
-// Grid pattern
-float grid(vec2 uv) {
-    vec2 grid_uv = fract(uv / GRID_SIZE);
-    vec2 grid_line = smoothstep(GRID_WIDTH, 0.0, abs(grid_uv - 0.5) - 0.5 + GRID_WIDTH);
-    return max(grid_line.x, grid_line.y);
-}
-
-// Hexagon shape
-float hexagon(vec2 p, float r) {
-    vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
-    p = abs(p);
-    p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
-    p -= vec2(clamp(p.x, -k.z * r, k.z * r), r);
-    return length(p) * sign(p.y);
-}
-
-// Spinning hexagon with glow
-vec3 spinningHexagon(vec2 uv, vec2 center, float size, float atime, float aspeed) {
-    vec2 p = uv - center;
-    p = rotate2D(p, atime * aspeed);
-    
-    float d = hexagon(p, size);
-    float outline = smoothstep(0.003, 0.0, abs(d));
-    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3;
-    
-    return LINE_COLOR * (outline + glow);
-}
-
-// Rotating circle ring
-vec3 rotatingRing(vec2 uv, vec2 center, float radius, float atime, float aspeed) {
-    vec2 p = uv - center;
-    float angle = atime * aspeed;
-    
-    float d = length(p) - radius;
-    float ring = smoothstep(0.003, 0.0, abs(d + 0.01)) + smoothstep(0.003, 0.0, abs(d - 0.01));
-    float glow = smoothstep(0.03, 0.0, abs(d)) * 0.2;
-    
-    // Add rotating dots on the ring - unroll loop
-    float a0 = angle + 0.0 * PI * 2.0 / 6.0;
-    vec2 dotPos0 = vec2(cos(a0), sin(a0)) * radius;
-    float dotDist0 = length(p - dotPos0);
-    ring += smoothstep(0.01, 0.0, dotDist0);
-    glow += smoothstep(0.02, 0.0, dotDist0) * 0.5;
-    
-    float a1 = angle + 1.0 * PI * 2.0 / 6.0;
-    vec2 dotPos1 = vec2(cos(a1), sin(a1)) * radius;
-    float dotDist1 = length(p - dotPos1);
-    ring += smoothstep(0.01, 0.0, dotDist1);
-    glow += smoothstep(0.02, 0.0, dotDist1) * 0.5;
-    
-    float a2 = angle + 2.0 * PI * 2.0 / 6.0;
-    vec2 dotPos2 = vec2(cos(a2), sin(a2)) * radius;
-    float dotDist2 = length(p - dotPos2);
-    ring += smoothstep(0.01, 0.0, dotDist2);
-    glow += smoothstep(0.02, 0.0, dotDist2) * 0.5;
-    
-    float a3 = angle + 3.0 * PI * 2.0 / 6.0;
-    vec2 dotPos3 = vec2(cos(a3), sin(a3)) * radius;
-    float dotDist3 = length(p - dotPos3);
-    ring += smoothstep(0.01, 0.0, dotDist3);
-    glow += smoothstep(0.02, 0.0, dotDist3) * 0.5;
-    
-    float a4 = angle + 4.0 * PI * 2.0 / 6.0;
-    vec2 dotPos4 = vec2(cos(a4), sin(a4)) * radius;
-    float dotDist4 = length(p - dotPos4);
-    ring += smoothstep(0.01, 0.0, dotDist4);
-    glow += smoothstep(0.02, 0.0, dotDist4) * 0.5;
-    
-    float a5 = angle + 5.0 * PI * 2.0 / 6.0;
-    vec2 dotPos5 = vec2(cos(a5), sin(a5)) * radius;
-    float dotDist5 = length(p - dotPos5);
-    ring += smoothstep(0.01, 0.0, dotDist5);
-    glow += smoothstep(0.02, 0.0, dotDist5) * 0.5;
-    
-    return LINE_COLOR * (ring + glow);
-}
-
-// Triangle shape
-float triangle(vec2 p, float r) {
-    float k = sqrt(3.0);
-    p.x = abs(p.x) - r;
-    p.y = p.y + r / k;
-    if (p.x + k * p.y > 0.0) {
-        p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0;
-    }
-    p.x -= clamp(p.x, -2.0 * r, 0.0);
-    return -length(p) * sign(p.y);
-}
-
-// Rotating triangle
-vec3 rotatingTriangle(vec2 uv, vec2 center, float size, float atime, float aspeed) {
-    vec2 p = uv - center;
-    p = rotate2D(p, atime * aspeed);
-    
-    float d = triangle(p, size);
-    float outline = smoothstep(0.003, 0.0, abs(d));
-    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3;
-    
-    return LINE_COLOR * (outline + glow);
-}
-
-// Pulsing hexagon
-vec3 pulsingHexagon(vec2 uv, vec2 center, float baseSize, float atime, float aspeed) {
-    vec2 p = uv - center;
-    float pulse = sin(atime * aspeed) * 0.5 + 0.5;
-    float size = baseSize * (0.7 + pulse * 0.3);
-    
-    float d = hexagon(p, size);
-    float outline = smoothstep(0.003, 0.0, abs(d));
-    float glow = smoothstep(0.04, 0.0, abs(d)) * 0.3 * pulse;
-    
-    return LINE_COLOR * (outline + glow * 2.0);
-}
-
-// Orbiting shapes - unrolled
-vec3 orbitingShapes(vec2 uv, vec2 center, float atime) {
-    vec3 color = vec3(0.0);
-    float orbitRadius = 0.15;
-    
-    float angle0 = atime * 0.5 + 0.0 * PI * 2.0 / 3.0;
-    vec2 orbitPos0 = center + vec2(cos(angle0), sin(angle0)) * orbitRadius;
-    vec2 p0 = uv - orbitPos0;
-    float d0 = length(p0) - 0.015;
-    float outline0 = smoothstep(0.002, 0.0, abs(d0));
-    float glow0 = smoothstep(0.02, 0.0, abs(d0)) * 0.5;
-    color += LINE_COLOR * (outline0 + glow0);
-    
-    float angle1 = atime * 0.5 + 1.0 * PI * 2.0 / 3.0;
-    vec2 orbitPos1 = center + vec2(cos(angle1), sin(angle1)) * orbitRadius;
-    vec2 p1 = uv - orbitPos1;
-    float d1 = length(p1) - 0.015;
-    float outline1 = smoothstep(0.002, 0.0, abs(d1));
-    float glow1 = smoothstep(0.02, 0.0, abs(d1)) * 0.5;
-    color += LINE_COLOR * (outline1 + glow1);
-    
-    float angle2 = atime * 0.5 + 2.0 * PI * 2.0 / 3.0;
-    vec2 orbitPos2 = center + vec2(cos(angle2), sin(angle2)) * orbitRadius;
-    vec2 p2 = uv - orbitPos2;
-    float d2 = length(p2) - 0.015;
-    float outline2 = smoothstep(0.002, 0.0, abs(d2));
-    float glow2 = smoothstep(0.02, 0.0, abs(d2)) * 0.5;
-    color += LINE_COLOR * (outline2 + glow2);
-    
-    return color;
-}
-
-// Scanlines
-float scanlines(vec2 uv, float atime) {
-    float line = sin((uv.y + atime * SCANLINE_SPEED) * 200.0);
-    return smoothstep(0.9, 1.0, line);
-}
-
-void main() {
-    // STAR NEST BACKGROUND
-    vec2 uv = v_uv - 0.5;
-    uv.y *= u_resolution.y / u_resolution.x;
-    vec3 dir = vec3(uv * zoom, 1.0);
-    
-    float time = u_time * speed + 0.25;
-    
-    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
-    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
-    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
-    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
-    dir.xz *= rot1;
-    dir.xy *= rot2;
-    
-    vec3 from = vec3(1.0, 0.5, 0.5);
-    from += vec3(time * 2.0, time, -2.0);
-    from.xz *= rot1;
-    from.xy *= rot2;
-    
-    float s = 0.1;
-    float fade = 1.0;
-    vec3 v = vec3(0.0);
-    
-    for (int r = 0; r < volsteps; r++) {
-        vec3 p = from + s * dir * 10.5;
-        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0)));
-        
-        float pa = 0.0;
-        float a = 0.0;
-        for (int i = 0; i < iterations; i++) { 
-            p = abs(p) / dot(p, p) - formuparam;
-            a += abs(length(p) - pa);
-            pa = length(p);
-        }
-        
-        float dm = max(0.0, darkmatter - a * a * 0.1);
-        a *= a * a;
-        
-        fade *= 1.0 - dm;
-        v += fade;
-        v += vec3(s, s * s, s * s * s) * a * brightness * fade;
-        fade *= distfading;
-        s += stepsize;
-    }
-    
-    v = mix(vec3(length(v)), v, saturation);
-    vec3 finalColor = v * 0.01;
-    
-    // NEW TRON ELEMENTS
-    vec2 centered_uv = v_uv - 0.5;
-    centered_uv.y *= u_resolution.y / u_resolution.x;
-    
-    // Add subtle grid
-    float gridPattern = grid(centered_uv * 5.0);
-    finalColor += LINE_COLOR * gridPattern * GRID_GLOW * 0.3;
-    
-    // Add horizontal scanlines
-    float scan = scanlines(v_uv, u_time);
-    finalColor += vec3(0.0, 0.3, 0.6) * scan * 0.15;
-    
-    // Add vertical accent lines (sparse)
-    float verticalLines = smoothstep(0.002, 0.0, abs(fract(v_uv.x * 8.0) - 0.5));
-    finalColor += LINE_COLOR * verticalLines * 0.2 * sin(u_time * 0.5 + v_uv.x * 10.0) * 0.5;
-    
-
-    // Rotating rings
-    finalColor += rotatingRing(centered_uv, vec2(0.0, 0.0), 0.12, u_time, 0.6);
-
-    // Orbiting small shapes around center
-    finalColor += orbitingShapes(centered_uv, vec2(0.0, 0.0), u_time);
-    
-    // TRON TRAVELING LINES OVERLAY (Original)
-    float edge_dist = distanceToEdge(v_uv, u_resolution);
-    
-    if (edge_dist < 0.05 && edge_dist > 0.0) {
-        float perimeter_pos = uvToPerimeter(v_uv, u_resolution);
-        float perimeter_length = 2.0 * (1.0 + (u_resolution.y - 2.0 * EDGE_MARGIN) / (u_resolution.x - 2.0 * EDGE_MARGIN));
-        float spacing = perimeter_length / float(NUM_LINES);
-        
-        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
-        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
-        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
-        
-        for (int i = 0; i < NUM_LINES; i++) {
-            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, perimeter_length);
-            float dist_to_line = abs(perimeter_pos * perimeter_length - line_pos);
-            dist_to_line = min(dist_to_line, abs(dist_to_line - perimeter_length));
-            
-            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
-            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
-            line_intensity = max(line_intensity, trail_intensity);
-            
-            vec3 glow_color = LINE_COLOR * 0.6;
-            
-            finalColor += LINE_COLOR * sharp_line * line_intensity * edge_falloff * 2.0;
-            finalColor += glow_color * soft_glow * line_intensity * edge_falloff;
-        }
-        
-        finalColor += vec3(0.3, 0.4, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
-    }
-    
-    gl_FragColor = vec4(finalColor, 1.0);
-}
-)";
-
-*/
 
 
 static const char *background_fragment_shader = R"(
@@ -1255,462 +915,6 @@ finalColor += e_symbol;
     gl_FragColor = vec4(finalColor, 1.0);
 }
 )";
-/*
-static const char *background_fragment_shader = R"(
-#version 100
-precision mediump float;
-uniform float u_time;
-uniform vec2 u_resolution;
-varying vec2 v_uv;
-
-// Star Nest by Pablo Roman Andrioli
-// License: MIT
-#define iterations 8
-#define formuparam 0.48
-#define volsteps 20
-#define stepsize 0.1
-#define zoom 0.800
-#define tile 0.850
-#define speed 0.01
-#define brightness 0.0005
-#define darkmatter 0.900
-#define distfading 0.630
-#define saturation 1.90
-
-// TRON-STYLE EDGE CONFIGURATION
-#define LINE_WIDTH 0.008
-#define LINE_LENGTH 0.12
-#define GLOW_WIDTH 0.55
-#define ANIMATION_SPEED 0.2
-#define BASE_EDGE_GLOW 0.5
-#define NUM_LINES 12
-#define EDGE_MARGIN 0.0
-
-// LINE COLOR - Blue
-#define LINE_COLOR vec3(0.0, 0.5, 1.0)
-
-// NEW TRON ELEMENTS
-#define GRID_SIZE 0.05
-#define GRID_WIDTH 0.001
-#define GRID_GLOW 0.15
-#define SCANLINE_SPEED 0.3
-#define SCANLINE_WIDTH 0.002
-#define HEX_SIZE 0.08
-#define HEX_GLOW 0.2
-
-float distanceToEdge(vec2 uv, vec2 resolution) {
-    vec2 pixel_pos = uv * resolution;
-    float dist_left = pixel_pos.x - EDGE_MARGIN;
-    float dist_right = resolution.x - EDGE_MARGIN - pixel_pos.x;
-    float dist_bottom = pixel_pos.y - EDGE_MARGIN;
-    float dist_top = resolution.y - EDGE_MARGIN - pixel_pos.y;
-    return min(min(dist_left, dist_right), min(dist_bottom, dist_top)) / resolution.x;
-}
-
-float uvToPerimeter(vec2 uv, vec2 resolution) {
-    vec2 pixel_pos = uv * resolution;
-    vec2 margin = vec2(EDGE_MARGIN);
-    vec2 inner_size = resolution - 2.0 * margin;
-    vec2 p = (pixel_pos - margin) / inner_size.x;
-    
-    float dist_left = p.x;
-    float dist_right = (inner_size.x / inner_size.x) - p.x;
-    float dist_bottom = p.y * (inner_size.y / inner_size.x);
-    float dist_top = (inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x);
-    
-    float edge_dist = min(min(dist_left, dist_right), min(dist_bottom, dist_top));
-    float perimeter_length = 2.0 * (1.0 + inner_size.y / inner_size.x);
-    
-    if (edge_dist == dist_bottom) {
-        return p.x / perimeter_length;
-    } else if (edge_dist == dist_right) {
-        return (1.0 + p.y * (inner_size.y / inner_size.x)) / perimeter_length;
-    } else if (edge_dist == dist_top) {
-        return (1.0 + (inner_size.y / inner_size.x) + (1.0 - p.x)) / perimeter_length;
-    } else {
-        return (2.0 + (inner_size.y / inner_size.x) + ((inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x))) / perimeter_length;
-    }
-}
-
-// Grid pattern
-float grid(vec2 uv) {
-    vec2 grid_uv = fract(uv / GRID_SIZE);
-    vec2 grid_line = smoothstep(GRID_WIDTH, 0.0, abs(grid_uv - 0.5) - 0.5 + GRID_WIDTH);
-    return max(grid_line.x, grid_line.y);
-}
-
-// Hexagonal grid pattern
-float hexDist(vec2 p) {
-    p = abs(p);
-    float c = dot(p, normalize(vec2(1.0, 1.732)));
-    c = max(c, p.x);
-    return c;
-}
-
-float hexPattern(vec2 uv) {
-    vec2 r = vec2(1.0, 1.732);
-    vec2 h = r * 0.5;
-    vec2 a = mod(uv, r) - h;
-    vec2 b = mod(uv - h, r) - h;
-    
-    vec2 gv = length(a) < length(b) ? a : b;
-    float dist = hexDist(gv);
-    float hex = smoothstep(HEX_SIZE, HEX_SIZE - 0.01, dist);
-    float hexEdge = smoothstep(HEX_SIZE - 0.005, HEX_SIZE - 0.015, dist);
-    return hexEdge - hex * 0.5;
-}
-
-// Scanlines
-float scanlines(vec2 uv, float time) {
-    float line = sin((uv.y + time * SCANLINE_SPEED) * 200.0);
-    return smoothstep(0.9, 1.0, line);
-}
-
-void main() {
-    // STAR NEST BACKGROUND
-    vec2 uv = v_uv - 0.5;
-    uv.y *= u_resolution.y / u_resolution.x;
-    vec3 dir = vec3(uv * zoom, 1.0);
-    
-    float time = u_time * speed + 0.25;
-    
-    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
-    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
-    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
-    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
-    dir.xz *= rot1;
-    dir.xy *= rot2;
-    
-    vec3 from = vec3(1.0, 0.5, 0.5);
-    from += vec3(time * 2.0, time, -2.0);
-    from.xz *= rot1;
-    from.xy *= rot2;
-    
-    float s = 0.1;
-    float fade = 1.0;
-    vec3 v = vec3(0.0);
-    
-    for (int r = 0; r < volsteps; r++) {
-        vec3 p = from + s * dir * 10.5;
-        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0)));
-        
-        float pa = 0.0;
-        float a = 0.0;
-        for (int i = 0; i < iterations; i++) { 
-            p = abs(p) / dot(p, p) - formuparam;
-            a += abs(length(p) - pa);
-            pa = length(p);
-        }
-        
-        float dm = max(0.0, darkmatter - a * a * 0.1);
-        a *= a * a;
-        
-        fade *= 1.0 - dm;
-        v += fade;
-        v += vec3(s, s * s, s * s * s) * a * brightness * fade;
-        fade *= distfading;
-        s += stepsize;
-    }
-    
-    v = mix(vec3(length(v)), v, saturation);
-    vec3 finalColor = v * 0.01;
-    
-    // NEW TRON ELEMENTS
-    vec2 centered_uv = v_uv - 0.5;
-    centered_uv.y *= u_resolution.y / u_resolution.x;
-    
-    // Add subtle grid
-    float gridPattern = grid(centered_uv * 5.0);
-    finalColor += LINE_COLOR * gridPattern * GRID_GLOW * 0.3;
-    
-    // Add hexagonal pattern (subtle, in center area)
-    float centerDist = length(centered_uv);
-    float hexFade = smoothstep(0.5, 0.2, centerDist);
-    float hexPat = hexPattern(centered_uv * 8.0);
-    finalColor += LINE_COLOR * hexPat * HEX_GLOW * hexFade * 0.4;
-    
-    // Add horizontal scanlines
-    float scan = scanlines(v_uv, u_time);
-    finalColor += vec3(0.0, 0.3, 0.6) * scan * 0.15;
-    
-    // Add vertical accent lines (sparse)
-    float verticalLines = smoothstep(0.002, 0.0, abs(fract(v_uv.x * 8.0) - 0.5));
-    finalColor += LINE_COLOR * verticalLines * 0.2 * sin(u_time * 0.5 + v_uv.x * 10.0) * 0.5;
-    
-    // TRON TRAVELING LINES OVERLAY (Original)
-    float edge_dist = distanceToEdge(v_uv, u_resolution);
-    
-    if (edge_dist < 0.05 && edge_dist > 0.0) {
-        float perimeter_pos = uvToPerimeter(v_uv, u_resolution);
-        float perimeter_length = 2.0 * (1.0 + (u_resolution.y - 2.0 * EDGE_MARGIN) / (u_resolution.x - 2.0 * EDGE_MARGIN));
-        float spacing = perimeter_length / float(NUM_LINES);
-        
-        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
-        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
-        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
-        
-        for (int i = 0; i < NUM_LINES; i++) {
-            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, perimeter_length);
-            float dist_to_line = abs(perimeter_pos * perimeter_length - line_pos);
-            dist_to_line = min(dist_to_line, abs(dist_to_line - perimeter_length));
-            
-            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
-            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
-            line_intensity = max(line_intensity, trail_intensity);
-            
-            vec3 glow_color = LINE_COLOR * 0.6;
-            
-            finalColor += LINE_COLOR * sharp_line * line_intensity * edge_falloff * 2.0;
-            finalColor += glow_color * soft_glow * line_intensity * edge_falloff;
-        }
-        
-        finalColor += vec3(0.3, 0.4, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
-    }
-    
-    gl_FragColor = vec4(finalColor, 1.0);
-}
-)";*/
-
-
-//https://www.shadertoy.com/view/XlfGRj
-/*
-static const char *background_fragment_shader = R"(
-#version 100
-precision mediump float;
-uniform float u_time;
-uniform vec2 u_resolution;
-varying vec2 v_uv;
-
-// Star Nest by Pablo Roman Andrioli
-// License: MIT
-#define iterations 8
-#define formuparam 0.48
-#define volsteps 20
-#define stepsize 0.1
-#define zoom 0.800
-#define tile 0.850
-#define speed 0.01
-#define brightness 0.0005
-#define darkmatter 0.900
-#define distfading 0.630
-#define saturation 1.90
-
-// TRON-STYLE EDGE CONFIGURATION
-#define LINE_WIDTH 0.008
-#define LINE_LENGTH 0.12
-#define GLOW_WIDTH 0.55
-#define ANIMATION_SPEED 0.2
-#define BASE_EDGE_GLOW 0.5
-#define NUM_LINES 12
-#define EDGE_MARGIN 0.0  // 50 pixel margin from edges
-
-// LINE COLOR - Blue
-#define LINE_COLOR vec3(0.0, 0.5, 1.0)
-
-float distanceToEdge(vec2 uv, vec2 resolution) {
-    // Convert to pixel coordinates
-    vec2 pixel_pos = uv * resolution;
-    
-    // Calculate distances to edges with margin
-    float dist_left = pixel_pos.x - EDGE_MARGIN;
-    float dist_right = resolution.x - EDGE_MARGIN - pixel_pos.x;
-    float dist_bottom = pixel_pos.y - EDGE_MARGIN;
-    float dist_top = resolution.y - EDGE_MARGIN - pixel_pos.y;
-    
-    // Return minimum distance (normalized)
-    return min(min(dist_left, dist_right), min(dist_bottom, dist_top)) / resolution.x;
-}
-
-float uvToPerimeter(vec2 uv, vec2 resolution) {
-    vec2 pixel_pos = uv * resolution;
-    vec2 margin = vec2(EDGE_MARGIN);
-    vec2 inner_size = resolution - 2.0 * margin;
-    
-    // Adjust UV to inner rectangle
-    vec2 p = (pixel_pos - margin) / inner_size.x;  // Normalize to inner rect
-    
-    float dist_left = p.x;
-    float dist_right = (inner_size.x / inner_size.x) - p.x;
-    float dist_bottom = p.y * (inner_size.y / inner_size.x);
-    float dist_top = (inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x);
-    
-    float edge_dist = min(min(dist_left, dist_right), min(dist_bottom, dist_top));
-    float perimeter_length = 2.0 * (1.0 + inner_size.y / inner_size.x);
-    
-    if (edge_dist == dist_bottom) {
-        return p.x / perimeter_length;  // Bottom edge
-    } else if (edge_dist == dist_right) {
-        return (1.0 + p.y * (inner_size.y / inner_size.x)) / perimeter_length;  // Right edge
-    } else if (edge_dist == dist_top) {
-        return (1.0 + (inner_size.y / inner_size.x) + (1.0 - p.x)) / perimeter_length;  // Top edge
-    } else {
-        return (2.0 + (inner_size.y / inner_size.x) + ((inner_size.y / inner_size.x) - p.y * (inner_size.y / inner_size.x))) / perimeter_length;  // Left edge
-    }
-}
-
-void main() {
-    // STAR NEST BACKGROUND
-    vec2 uv = v_uv - 0.5;
-    uv.y *= u_resolution.y / u_resolution.x;
-    vec3 dir = vec3(uv * zoom, 1.0);
-    
-    float time = u_time * speed + 0.25;
-    
-    // Auto-rotation
-    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
-    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
-    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
-    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
-    dir.xz *= rot1;
-    dir.xy *= rot2;
-    
-    vec3 from = vec3(1.0, 0.5, 0.5);
-    from += vec3(time * 2.0, time, -2.0);
-    from.xz *= rot1;
-    from.xy *= rot2;
-    
-    // Volumetric rendering
-    float s = 0.1;
-    float fade = 1.0;
-    vec3 v = vec3(0.0);
-    
-    for (int r = 0; r < volsteps; r++) {
-        vec3 p = from + s * dir * 10.5;
-        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0)));
-        
-        float pa = 0.0;
-        float a = 0.0;
-        for (int i = 0; i < iterations; i++) { 
-            p = abs(p) / dot(p, p) - formuparam;
-            a += abs(length(p) - pa);
-            pa = length(p);
-        }
-        
-        float dm = max(0.0, darkmatter - a * a * 0.1);
-        a *= a * a;
-        
-        fade *= 1.0 - dm;
-        v += fade;
-        v += vec3(s, s * s, s * s * s) * a * brightness * fade;
-        fade *= distfading;
-        s += stepsize;
-    }
-    
-    v = mix(vec3(length(v)), v, saturation);
-    vec3 finalColor = v * 0.01;
-    
-    // TRON TRAVELING LINES OVERLAY
-    float edge_dist = distanceToEdge(v_uv, u_resolution);
-    
-    if (edge_dist < 0.05 && edge_dist > 0.0) {
-        float perimeter_pos = uvToPerimeter(v_uv, u_resolution);
-        float perimeter_length = 2.0 * (1.0 + (u_resolution.y - 2.0 * EDGE_MARGIN) / (u_resolution.x - 2.0 * EDGE_MARGIN));
-        float spacing = perimeter_length / float(NUM_LINES);
-        
-        float edge_falloff = smoothstep(0.05, 0.0, edge_dist);
-        float sharp_line = smoothstep(LINE_WIDTH * 2.0, 0.0, edge_dist);
-        float soft_glow = smoothstep(GLOW_WIDTH, 0.0, edge_dist);
-        
-        for (int i = 0; i < NUM_LINES; i++) {
-            float line_pos = mod(u_time * ANIMATION_SPEED + float(i) * spacing, perimeter_length);
-            float dist_to_line = abs(perimeter_pos * perimeter_length - line_pos);
-            dist_to_line = min(dist_to_line, abs(dist_to_line - perimeter_length));
-            
-            float line_intensity = smoothstep(LINE_LENGTH, 0.0, dist_to_line);
-            float trail_intensity = smoothstep(LINE_LENGTH * 2.0, LINE_LENGTH, dist_to_line) * 0.3;
-            line_intensity = max(line_intensity, trail_intensity);
-            
-            vec3 glow_color = LINE_COLOR * 0.6;
-            
-            finalColor += LINE_COLOR * sharp_line * line_intensity * edge_falloff * 2.0;
-            finalColor += glow_color * soft_glow * line_intensity * edge_falloff;
-        }
-        
-        // Subtle constant edge glow
-        finalColor += vec3(0.3, 0.4, 0.5) * edge_falloff * BASE_EDGE_GLOW * 0.3;
-    }
-    
-    gl_FragColor = vec4(finalColor, 1.0);
-}
-)";*/
-
-
-
-/*static const char *background_fragment_shader = R"(
-#version 100
-precision mediump float;
-uniform float u_time;
-uniform vec2 u_resolution;
-varying vec2 v_uv;
-// Star Nest by Pablo Roman Andrioli
-// License: MIT
-#define iterations 8
-#define formuparam 0.48
-#define volsteps 20
-#define stepsize 0.1
-#define zoom 0.800
-#define tile 0.850
-#define speed 0.01
-#define brightness 0.0005
-#define darkmatter 0.900
-#define distfading 0.630
-#define saturation 1.90
-
-void main() {
-    // Get coords and direction
-    vec2 uv = v_uv - 0.5;
-    uv.y *= u_resolution.y / u_resolution.x;
-    vec3 dir = vec3(uv * zoom, 1.0);
-    
-    float time = u_time * speed + 0.25;
-    
-    // Auto-rotation (100x slower)
-    float a1 = 0.5 + sin(u_time * 0.001) * 0.5;
-    float a2 = 0.8 + cos(u_time * 0.0015) * 0.5;
-    mat2 rot1 = mat2(cos(a1), sin(a1), -sin(a1), cos(a1));
-    mat2 rot2 = mat2(cos(a2), sin(a2), -sin(a2), cos(a2));
-    dir.xz *= rot1;
-    dir.xy *= rot2;
-    
-    vec3 from = vec3(1.0, 0.5, 0.5);
-    from += vec3(time * 2.0, time, -2.0);
-    from.xz *= rot1;
-    from.xy *= rot2;
-    
-    // Volumetric rendering
-    float s = 0.1;
-    float fade = 1.0;
-    vec3 v = vec3(0.0);
-    
-    for (int r = 0; r < volsteps; r++) {
-        vec3 p = from + s * dir * 10.5;
-        p = abs(vec3(tile) - mod(p, vec3(tile * 2.0))); // tiling fold
-        
-        float pa = 0.0;
-        float a = 0.0;
-        for (int i = 0; i < iterations; i++) { 
-            p = abs(p) / dot(p, p) - formuparam; // the magic formula
-            a += abs(length(p) - pa); // absolute sum of average change
-            pa = length(p);
-        }
-        
-        float dm = max(0.0, darkmatter - a * a * 0.1); // dark matter
-        a *= a * a; // add contrast
-        
-       // if (r > 6) {
-            fade *= 1.0 - dm; // dark matter, don't render near
-       // }
-        
-        v += fade;
-        v += vec3(s, s * s, s * s * s) * a * brightness * fade; // coloring based on distance
-        fade *= distfading; // distance fading
-        s += stepsize;
-    }
-    
-   v = mix(vec3(length(v)), v, saturation); // color adjust
-    gl_FragColor = vec4(v * 0.01, 1.0);
-}
-)";*/
 
 
 static const char *cursor_vertex_shader = R"(
@@ -2599,6 +1803,12 @@ private:
     std::unique_ptr<wf::input_grab_t> input_grab;
     std::shared_ptr<cube_render_node_t> render_node;
 
+        // Window dragging support
+    wayfire_toplevel_view grabbed_view = nullptr;
+    wf::point_t grab_position;
+    wf::pointf_t relative_grab_position;
+ 
+
     wf::option_wrapper_t<double> XVelocity{"vertical_expo/speed_spin_horiz"},
     YVelocity{"vertical_expo/speed_spin_vert"}, ZVelocity{"vertical_expo/speed_zoom"};
     wf::option_wrapper_t<double> zoom_opt{"vertical_expo/zoom"};
@@ -2685,6 +1895,8 @@ private:
             background = std::make_unique<wf_cube_simple_background>();
         }
     }
+
+
 
     bool tessellation_support;
 
@@ -3241,6 +2453,16 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
                     drag_offset.x = virtual_cursor.x - geom.x;
                     drag_offset.y = virtual_cursor.y - geom.y;
                     
+                    // ============================================================
+                    // WOBBLY: Start wobbly effect when grabbing window
+                    // ============================================================
+                    start_wobbly(dragged_view, virtual_cursor.x, virtual_cursor.y);
+                    
+                    // Calculate relative grab position for wobbly
+                    relative_grab_position.x = drag_offset.x / (double)geom.width;
+                    relative_grab_position.y = drag_offset.y / (double)geom.height;
+                    // ============================================================
+                    
                     LOGI("✓ Dragging '", dragged_view->get_title(), "' on WS (", 
                          hit.ws.x, ",", hit.ws.y, ")");
                     LOGI("  Window at (", geom.x, ",", geom.y, "), cursor at (", 
@@ -3267,9 +2489,44 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
             
             if (is_dragging_window)
             {
-                // Before clearing the drag state, move the window to the correct workspace
+                // ============================================================
+                // WOBBLY: End wobbly effect before moving window
+                // ============================================================
                 if (dragged_view)
                 {
+                    // End the wobbly effect
+                    end_wobbly(dragged_view);
+                    
+                    // Get final position for wobbly rebuild
+                    auto cursor = wf::get_core().get_cursor_position();
+                    Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
+                    HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
+                    
+                    if (hit.ws.x >= 0)
+                    {
+                        auto bbox = output->get_layout_geometry();
+                        float window_offset = get_window_z_offset();
+                        float perspective_scale = plane_z / (plane_z + window_offset);
+                        
+                        float centered_uv_x = hit.local_uv.x - 0.5f;
+                        float centered_uv_y = hit.local_uv.y - 0.5f;
+                        float corrected_uv_x = (centered_uv_x * perspective_scale) + 0.5f;
+                        float corrected_uv_y = (centered_uv_y * perspective_scale) + 0.5f;
+                        
+                        float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
+                        float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);
+                        wf::point_t final_position{(int)virtual_x, (int)virtual_y};
+                        
+                        // Rebuild wobbly with final position
+                     //   rebuild_wobbly(dragged_view, final_position, relative_grab_position);
+                        
+                        // Translate back to output-local coordinates
+                        translate_wobbly(dragged_view, 
+                            -wf::origin(dragged_view->get_output()->get_layout_geometry()));
+                    }
+                    // ============================================================
+                    
+                    // Before clearing the drag state, move the window to the correct workspace
                     auto ws_set = output->wset();
                     auto current_ws = ws_set->get_view_main_workspace(dragged_view);
                     auto window_geom = dragged_view->get_geometry();
@@ -4600,14 +3857,13 @@ void pointer_moved(wlr_pointer_motion_event *ev)
     {
         return;
     }
-
     auto cursor = wf::get_core().get_cursor_position();
-    
+
     // UPDATE CURSOR INDICATOR AND VIRTUAL HIT ON EVERY MOUSE MOVE
     if (output->is_plugin_active(grab_interface.name))
     {
         Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
-        
+
         // Always compute virtual hit on the infinite plane
         if (std::abs(ray.dir.z) > 1e-6f) {
             float t = (plane_z - ray.origin.z) / ray.dir.z;
@@ -4620,10 +3876,10 @@ void pointer_moved(wlr_pointer_motion_event *ev)
         } else {
             has_virtual_hit = false;
         }
-        
+
         // Compute bounded hit for cursor indicator
         HitInfo hit = raycast_to_workspace(ray.origin, ray.dir, output);
-        
+
         static bool logged_hit = false;
         if (hit.ws.x >= 0)
         {
@@ -4635,16 +3891,16 @@ void pointer_moved(wlr_pointer_motion_event *ev)
             cursor_indicator.world_position = ray.origin + hit.t * ray.dir;
             // Sync virtual hit with actual hit when bounded
             virtual_ray_hit_pos = cursor_indicator.world_position;
-            
+
             // STORE WHICH WORKSPACE IS AT THE HIT POINT
             hit_workspace_x = hit.ws.x;
             hit_workspace_y = hit.ws.y;
-            
+
             if (!logged_hit)
             {
                 LOGI("pointer_moved: Hit detected! Setting cursor_indicator.active=true");
-                LOGI("  workspace=(", hit.ws.x, ",", hit.ws.y, ")");
-                LOGI("  UV=(", hit.local_uv.x, ",", hit.local_uv.y, ")");
+                LOGI(" workspace=(", hit.ws.x, ",", hit.ws.y, ")");
+                LOGI(" UV=(", hit.local_uv.x, ",", hit.local_uv.y, ")");
                 logged_hit = true;
             }
         }
@@ -4659,64 +3915,74 @@ void pointer_moved(wlr_pointer_motion_event *ev)
         has_virtual_hit = false;
     }
     // ============================================================
-    
+
     // If dragging a window, move it and check workspace boundaries
-   if (is_dragging_window && dragged_view)
+// If dragging a window, move it and check workspace boundaries
+if (is_dragging_window && dragged_view)
+{
+    static wf::pointf_t last_virtual_pos = {0, 0};  // NEW: Track prev virtual for delta
+
+    // Get the actual mouse cursor position and convert to 3D ray
+    Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
+    // Use window layer depth for accurate window dragging
+    HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
+    if (hit.ws.x >= 0)
     {
-        // Get the actual mouse cursor position and convert to 3D ray
-        Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
-        // Use window layer depth for accurate window dragging
-        HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
+        // Compute virtual cursor position - add workspace offset to get absolute position
+        auto bbox = output->get_layout_geometry();
         
-        if (hit.ws.x >= 0)
-        {
-            // Compute virtual cursor position - add workspace offset to get absolute position
-            auto bbox = output->get_layout_geometry();
-            
-            // Apply perspective correction since we're at window depth
-            float window_offset = get_window_z_offset();
-            float perspective_scale = plane_z / (plane_z + window_offset);
-            float centered_uv_x = hit.local_uv.x - 0.5f;
-            float centered_uv_y = hit.local_uv.y - 0.5f;
-            float corrected_uv_x = (centered_uv_x * perspective_scale) + 0.5f;
-            float corrected_uv_y = (centered_uv_y * perspective_scale) + 0.5f;
-            
-            float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
-            float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);
-            
-            // Position the window so that the drag_offset point stays under the cursor
-            wf::geometry_t new_geom = dragged_view->get_geometry();
-            new_geom.x = virtual_x - drag_offset.x;
-            new_geom.y = virtual_y - drag_offset.y;
-            
-            // CRITICAL: Just set the geometry, DON'T move to new workspace during drag
-            // The overlap detection will make it visible on adjacent workspaces
-            dragged_view->set_geometry(new_geom);
-            
-            // DEBUG: Log the window position
-            auto ws_set = output->wset();
-            auto current_ws = ws_set->get_view_main_workspace(dragged_view);
-            LOGI("DRAG: Window at (", new_geom.x, ",", new_geom.y, ") size (", 
-                 new_geom.width, "x", new_geom.height, ") on workspace (", 
-                 current_ws.x, ",", current_ws.y, ")");
-            
-            // Damage workspace nodes to trigger re-rendering
-            if (render_node)
-            {
-                auto cube_node = std::dynamic_pointer_cast<cube_render_node_t>(render_node);
-                if (cube_node)
-                {
-                    cube_node->damage_all_workspace_windows();
-                }
-            }
+        // Apply perspective correction since we're at window depth (NEW: Less aggressive for Y)
+        float window_offset = get_window_z_offset();
+        float perspective_scale_x = plane_z / (plane_z + window_offset);  // Keep for X
+        float perspective_scale_y = 1.0f;  // NEW: No scale for Y (direct UV) to boost sensitivity
+        float centered_uv_x = hit.local_uv.x - 0.5f;
+        float centered_uv_y = hit.local_uv.y - 0.5f;
+        float corrected_uv_x = (centered_uv_x * perspective_scale_x) + 0.5f;
+        float corrected_uv_y = (centered_uv_y * perspective_scale_y) + 0.5f;  // Direct UV for Y
+        
+        float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
+        float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);  // Flip Y for screen-down
+        
+        // NEW: Hybrid for intra-row Y: If same row, add direct mouse delta (smooth fallback)
+        float delta_y = cursor.y - last_cursor_pos.y;
+        if (hit.row_offset == 0) {  // Same row: Boost with raw delta
+            virtual_y += delta_y * 0.8f;  // 80% mouse sensitivity (tune 0.8f)
+            LOGI("INTRA-ROW Y BOOST: delta_y=", delta_y, " virtual_y=", virtual_y);
         }
         
-        last_cursor_pos = cursor;
-        output->render->schedule_redraw();
-        return;  // Don't rotate camera
+        // FIXED: Update wobbly effect with dragged_view and VIRTUAL position
+        move_wobbly(dragged_view, virtual_x, virtual_y);
+        
+        // Position the window so that the drag_offset point stays under the cursor
+        wf::geometry_t new_geom = dragged_view->get_geometry();
+        new_geom.x = virtual_x - drag_offset.x;
+        new_geom.y = virtual_y - drag_offset.y;
+        
+        // CRITICAL: Just set the geometry, DON'T move to new workspace during drag
+        dragged_view->set_geometry(new_geom);
+        
+        // DEBUG: Log changes (add UV delta for sensitivity check)
+        static float last_uv_y = 0.5f;
+        float uv_delta_y = hit.local_uv.y - last_uv_y;
+        LOGI("DRAG: Mouse delta_y=", (cursor.y - last_cursor_pos.y), " UV_y=", hit.local_uv.y, " UV_delta_y=", uv_delta_y,
+             " virtual_y=", virtual_y, " ws_y=", hit.ws.y);
+        last_uv_y = hit.local_uv.y;
+        last_virtual_pos = {virtual_x, virtual_y};
+        
+        // Damage workspace nodes to trigger re-rendering
+        if (render_node)
+        {
+            auto cube_node = std::dynamic_pointer_cast<cube_render_node_t>(render_node);
+            if (cube_node)
+            {
+                cube_node->damage_all_workspace_windows();
+            }
+        }
     }
-
-
+    last_cursor_pos = cursor;
+    output->render->schedule_redraw();
+    return; // Don't rotate camera
+}
     last_cursor_pos = cursor;
     output->render->schedule_redraw();
 }
