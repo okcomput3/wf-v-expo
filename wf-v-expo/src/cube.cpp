@@ -1102,7 +1102,7 @@ class windows_only_workspace_node_t : public wf::scene::node_t
             }
             
             view_count++;
-            LOGI("Generating render instances for view on workspace ", workspace.x, ",", workspace.y);
+        //    LOGI("Generating render instances for view on workspace ", workspace.x, ",", workspace.y);
             
             // Use root node which includes decorations
             auto view_node = view->get_root_node();
@@ -1110,11 +1110,11 @@ class windows_only_workspace_node_t : public wf::scene::node_t
             {
                 size_t before = instances.size();
                 view_node->gen_render_instances(instances, push_damage, shown_on);
-                LOGI("Generated ", instances.size() - before, " render instances");
+      //          LOGI("Generated ", instances.size() - before, " render instances");
             }
         }
         
-        LOGI("Total views on workspace ", workspace.x, ",", workspace.y, ": ", view_count);
+    //    LOGI("Total views on workspace ", workspace.x, ",", workspace.y, ": ", view_count);
     }
     
     wf::geometry_t get_bounding_box() override
@@ -2394,6 +2394,8 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
             } else {
                 has_virtual_hit = false;
             }
+
+
             
             HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
             
@@ -3307,7 +3309,7 @@ bool move_vp_vertical(int dir)
     animation.cube_animation.offset_y.restart_with_end(0);
     animation.cube_animation.offset_z.restart_with_end(required_z);
     animation.cube_animation.ease_deformation.restart_with_end(0);
-    animation.cube_animation.max_tilt.restart_with_end(glm::radians(180.0f));  // Set tilt to 180° in cube mode
+    animation.cube_animation.max_tilt.restart_with_end(glm::radians(45.0f));  // Set tilt to 180° in cube mode
     
     LOGI("########## move_vp_vertical: Setting max_tilt to 180° ##########");
     
@@ -3467,78 +3469,89 @@ float smoothstep(float edge0, float edge1, float x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scale = 1.0f, bool is_window_layer = false)
+// Change the signature to take a float depth index
+glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scale = 1.0f, bool is_window_layer = false, float layer_depth_index = 0.0f)
 {
-    // FLAT GRID LAYOUT: Instead of rotating around Y axis, lay out workspaces horizontally
-    float horizontal_spacing = CUBE_SPACING;
+    // *** NEW: LAYERED DEPTH SETUP ***
+    // Set the total number of layers for the depth effect (including the main face at 0)
+    const float NUM_DEPTH_LAYERS = 40.0f; // 0.0, 0.2, 0.4, 0.6, 0.8...
+    const float MAX_RECESSED_Z = 1.0f;   // The deepest plane will be at Z=-0.5f
     
-    // Calculate horizontal position based on workspace index and rotation
-    // rotation controls smooth sliding between workspaces
-    float x_offset = (i * horizontal_spacing) + (animation.cube_animation.rotation / animation.side_angle) * horizontal_spacing;
+    const float INITIAL_PANE_TILT = glm::radians(0.0f);
     
-    // No rotation - all faces point forward toward camera
-    auto rotation = glm::mat4(1.0);
+    // Determine the Z-shift based on the index.
+    float z_shift = 0.0f;
     
-    double additional_z = 0.0;
-    if (get_num_faces() == 2)
-    {
-        additional_z = 1e-3;
+    if (layer_depth_index > 0.0f) {
+        // Calculate a Z-offset from the main plane (z=0)
+        // Layer 1.0 -> Z=-0.1, Layer 5.0 -> Z=-0.5 (or similar, depending on how you index it)
+        // NOTE: We invert the index so layer 1 is shallowest, layer 5 is deepest.
+        float normalized_depth = (layer_depth_index / NUM_DEPTH_LAYERS); 
+        z_shift = -(normalized_depth * MAX_RECESSED_Z);
     }
     
-   // Interpolate window Z offset based on zoom level
-   // When zoomed out (cube view, zoom < 1): offset = 0.2
-   // When zoomed in (normal view, zoom = 1): offset = 0.01
+    // The original window_z_offset logic only applies to the dedicated window layer.
+    // The regular z_shift logic below handles the main desktop faces.
+
+    // ... (FLAT GRID LAYOUT / X_OFFSET calculation remains the same) ...
+    float horizontal_spacing = CUBE_SPACING;
+    float x_offset = (i * horizontal_spacing) + (animation.cube_animation.rotation / animation.side_angle) * horizontal_spacing;
+    
+    // Initial rotation (unconditional tilt for ALL planes)
+    auto rotation = glm::mat4(1.0);
+    {
+        float tilt_direction = glm::sign(x_offset) * -1.0f; 
+        rotation = glm::rotate(glm::mat4(1.0f), tilt_direction * INITIAL_PANE_TILT, glm::vec3(0.0f, 1.0f, 0.0f));
+    }
+    
+    // Calculate standard Z offsets (original logic)
+    double additional_z = 0.0;
+    if (get_num_faces() == 2) { additional_z = 1e-3; }
+    
+   // Interpolate window Z offset (preserved original meaning for window content)
    double window_z_offset = 0.0;
-    if (is_window_layer)
+    if (is_window_layer) // This remains for its original use: putting window content in front of its texture background
     {
         float zoom_factor = animation.cube_animation.zoom;
-        // Clamp zoom to 0-1 range for interpolation
         zoom_factor = std::max(0.0f, std::min(1.0f, zoom_factor));
-        
-        // Interpolate: zoom=0 -> 0.2, zoom=1 -> 0.01
         window_z_offset = 0.2 * (1.0 - zoom_factor) + 0.01 * zoom_factor;
     }
     
+    // Apply translation using the calculated z_shift (now based on depth index)
     auto translation = glm::translate(glm::mat4(1.0),
-        glm::vec3(x_offset, 0, identity_z_offset + additional_z + window_z_offset));
+        glm::vec3(x_offset, 0, identity_z_offset + additional_z + window_z_offset + z_shift));
     
     
-    // Apply uniform scaling to everything
+    // ... (scale_matrix and vertical_translation remain the same) ...
     auto scale_matrix = glm::scale(glm::mat4(1.0), glm::vec3(scale, scale, scale));
+    auto vertical_translation = glm::translate(glm::mat4(1.0), glm::vec3(0, vertical_offset, 0));
     
-    // Apply vertical offset AFTER scaling so it doesn't get scaled
-    auto vertical_translation = glm::translate(glm::mat4(1.0),
-        glm::vec3(0, vertical_offset, 0));
-    
-    // NEW: Physics-based pivot/tilt towards raycast hit point (virtual or actual)
+    // Physics-based pivot/tilt logic (applies to ALL desktop planes, regardless of depth) 
     glm::mat4 tilt = glm::mat4(1.0f);
     glm::mat4 pivot_rotation = glm::mat4(1.0f);
     
-    // During exit animation (in_exit=true), apply tilt to ALL workspaces to interpolate smoothly to 0
-    // During normal cube mode, only apply tilt based on cursor position
-    bool should_apply_tilt = animation.in_exit || (has_virtual_hit && !is_window_layer);
+    // The tilt logic should apply if tilt is generally needed AND we are NOT drawing the window layer (since windows shouldn't tilt)
+    bool is_desktop_layer = !is_window_layer; 
     
-    if (should_apply_tilt && !is_window_layer) {
-        // Calculate which workspace this face represents
+    bool should_apply_tilt = (animation.in_exit || has_virtual_hit) && is_desktop_layer;
+    
+    if (should_apply_tilt) {
+        // ... (Original tilt and pivot logic runs here, identical to the last working version) ...
         auto cws = output->wset()->get_current_workspace();
-        int this_workspace_x = i;  // Workspace horizontal index
+        int this_workspace_x = i;  
         
-        // Calculate the row based on vertical_offset
         int row_offset = static_cast<int>(std::round(vertical_offset / std::abs(CUBE_VERTICAL_SPACING)));
         int this_workspace_y = cws.y + row_offset;
         
-        // Check if this workspace has any windows on it
         bool has_windows = workspace_has_windows(this_workspace_x, this_workspace_y);
         
         if (!has_windows) {
-            // During exit, use center position for tilt calculation
             glm::vec3 hit_pos = animation.in_exit ? glm::vec3(0.0f, 0.0f, 0.0f) : virtual_ray_hit_pos;
             
-            // ALL ROWS COPY TOP ROW: Only use X distance, ignore vertical offset completely
-            float dx = x_offset - hit_pos.x;  // Only horizontal distance matters
-            float dist_x = std::abs(dx);      // Distance in X only
+            float dx = x_offset - hit_pos.x;
+            float dist_x = std::abs(dx);
             
-            // Apply rotation based on X distance only - same for all rows
+            // Pivot Rotation
             const float inner_radius = 0.35f * CUBE_SPACING;
             const float outer_radius = 2.8f * CUBE_SPACING;
             
@@ -3547,29 +3560,20 @@ glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scal
                 float rotation_strength = std::sin(t * M_PI);
                 float pivot_angle = rotation_strength * glm::radians(40.0f) * (dx > 0 ? 1.0f : -1.0f);
                 
-                // Don't apply pivot rotation during exit animation
                 if (!animation.in_exit) {
                     pivot_rotation = glm::rotate(glm::mat4(1.0f), pivot_angle, glm::vec3(0.0f, 1.0f, 0.0f));
                 }
             }
             
-            // Tilt effect - also only based on X distance
+            // Tilt Effect
             const float max_ws_radius = 4.0f;
             const float ws_dist = dist_x / CUBE_SPACING;
             
-            // During exit, apply tilt to ALL workspaces. During normal mode, only apply beyond ws_dist > 1.0
             bool in_tilt_range = animation.in_exit || (ws_dist > 1.0f && ws_dist <= max_ws_radius);
             
             if (in_tilt_range) {
                 float tilt_factor = smoothstep(1.0f, max_ws_radius, ws_dist);
-                float max_tilt_rad = animation.cube_animation.max_tilt;  // Use animated tilt value
-                
-                // Debug output (only log occasionally to avoid spam)
-                static int log_counter = 0;
-                if (log_counter++ % 100 == 0) {
-                    LOGI("Tilt calc: in_exit=", animation.in_exit, " max_tilt_rad=", glm::degrees(max_tilt_rad), 
-                         "° tilt_factor=", tilt_factor, " ws_dist=", ws_dist, " i=", i);
-                }
+                float max_tilt_rad = animation.cube_animation.max_tilt;
                 
                 if (dist_x > 1e-6f && tilt_factor > 0.0f && max_tilt_rad > 0.0f) {
                     float tilt_y = -(dx / dist_x) * max_tilt_rad * tilt_factor;
@@ -3579,16 +3583,14 @@ glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scal
                 }
             }
         }
-        // If has_windows == true, both tilt and pivot_rotation stay as identity (no rotation)
     }
     
-    // Order: vertical_translation * translation * tilt * pivot_rotation * scale_matrix * rotation
     return vertical_translation * translation * tilt * pivot_rotation * scale_matrix * rotation;
 }
     /* Render the sides of the cube, using the given culling mode - cw or ccw */
 void render_cube(GLuint front_face, std::vector<wf::auxilliary_buffer_t>& buffers, 
                  const glm::mat4& vp,
-                 float vertical_offset = 0.0f, float scale = 1.0f, bool is_window_layer = false)
+                 float vertical_offset = 0.0f, float scale = 1.0f, bool is_window_layer = false, float layer_depth_index = 0.0f)
 {
     GL_CALL(glEnable(GL_DEPTH_TEST));
     GL_CALL(glDepthFunc(GL_LESS));
@@ -3660,7 +3662,7 @@ if (time_loc >= 0) {
         auto tex_id = wf::gles_texture_t::from_aux(buffers[index]).tex_id;
         
         GL_CALL(glBindTexture(GL_TEXTURE_2D, tex_id));
-        auto model = calculate_model_matrix(i, vertical_offset, scale, is_window_layer);
+         auto model = calculate_model_matrix(i, vertical_offset, scale, is_window_layer, layer_depth_index);
         active_program.uniformMatrix4f("model", model);
         
         if (tessellation_support && !is_window_layer)
@@ -3741,7 +3743,7 @@ void render(const wf::scene::render_instruction_t& data,
         
 
         
-        // RESTORE CUBE PROGRAM STATE after caps
+// RESTORE CUBE PROGRAM STATE
         program.use(wf::TEXTURE_TYPE_RGBA);
         program.attrib_pointer("position", 2, 0, vertexData);
         program.attrib_pointer("uvPosition", 2, 0, coordData);
@@ -3750,24 +3752,91 @@ void render(const wf::scene::render_instruction_t& data,
         GL_CALL(glDepthMask(GL_TRUE));
         
         // ============================================
-        // RENDER DESKTOP BACKGROUNDS (false = desktop)
+        // 1. NEW LAYERED DESKTOP BACKGROUND (RECESSED PLATES)
+        // Loop from deepest layer (index 5) to the frontmost layer (index 1)
+        // The layer at index 0 is the main desktop which is drawn with the windows on top.
+        // ============================================
+        
+        const int NUM_RECESSED_PLATES = 5;
+
+        for (int layer_idx = NUM_RECESSED_PLATES; layer_idx >= 1; --layer_idx)
+        {
+            float depth_index = (float)layer_idx;
+            
+            // Render BACK FACES for all rows
+            for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+            {
+                float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+                // is_window_layer=false: This is still desktop content, but the depth index handles the Z-shift.
+                render_cube(GL_CCW, buffers_rows[row],  vp,  vertical_offset, 1.0f, false, depth_index); 
+            }
+            // Render BACK FACES for current row
+            render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false, depth_index);  
+            
+            // Render FRONT FACES for all rows
+            for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+            {
+                float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+                render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false, depth_index); 
+            }
+            // Render FRONT FACES for current row
+            render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false, depth_index);  
+        }
+
+        // ============================================
+        // 2. MAIN DESKTOP PLANE (LAYER 0 - The one the windows float over)
+        // CONTENT: buffers (desktop content)
+        // MATRIX: is_window_layer=false, layer_depth_index=0.0f (z_shift=0.0f, ALL Tilts)
+        // ============================================
+        
+        // BACK FACES
+        for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+        {
+            float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+            render_cube(GL_CCW, buffers_rows[row],  vp,  vertical_offset, 1.0f, false, 0.0f);
+        }
+        render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false, 0.0f);
+        
+        // FRONT FACES
+        for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+        {
+            float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+            render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false, 0.0f);
+        }
+        render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false, 0.0f);
+        
+
+        // RESTORE STATE for window popout cubes
+        program.use(wf::TEXTURE_TYPE_RGBA);
+        program.attrib_pointer("position", 2, 0, vertexData);
+        program.attrib_pointer("uvPosition", 2, 0, coordData);
+        program.uniformMatrix4f("VP", vp);
+        GL_CALL(glEnable(GL_CULL_FACE));
+        GL_CALL(glDepthFunc(GL_LESS));
+        GL_CALL(glDepthMask(GL_TRUE));
+
+        
+        // ============================================
+        // 1. ORIGINAL: RENDER DESKTOP BACKGROUNDS (NEAR/ANGLED)
+        // CONTENT: buffers (desktop content)
+        // MATRIX: is_window_layer=false (z_shift=0.0f, INITIAL_PANE_TILT) -> KEEP AS IS
         // ============================================
         
         // BACK FACES - Desktop backgrounds for all rows
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-            render_cube(GL_CCW, buffers_rows[row],  vp,  vertical_offset, 1.0f, false);  // ← false = desktop
+            render_cube(GL_CCW, buffers_rows[row],  vp,  vertical_offset, 1.0f, false, false); // <--- ADDED 'false'
         }
-        render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false);  // ← false = desktop
+        render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false, false); // <--- ADDED 'false'
         
         // FRONT FACES - Desktop backgrounds for all rows
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-            render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false);  // ← false = desktop
+            render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false, false); // <--- ADDED 'false'
         }
-        render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false);  // ← false = desktop
+        render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false, false); // <--- ADDED 'false'
         
 
         // RESTORE STATE for window popout cubes
@@ -3780,7 +3849,9 @@ void render(const wf::scene::render_instruction_t& data,
         GL_CALL(glDepthMask(GL_TRUE));
         
         // ============================================
-        // RENDER WINDOWS (true = windows, in front!)
+        // 2. ORIGINAL: RENDER WINDOWS (FAR/FLAT)
+        // CONTENT: buffers_windows (window content)
+        // MATRIX: is_window_layer=true (z_shift=0.5f, rotation=I) -> KEEP AS IS
         // ============================================
         
       //  if (enable_window_popout)
@@ -3791,17 +3862,17 @@ void render(const wf::scene::render_instruction_t& data,
             for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
             {
                 float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-                render_cube(GL_CCW, buffers_windows_rows[row], vp, vertical_offset, scale, true);  // ← true = windows
+                render_cube(GL_CCW, buffers_windows_rows[row], vp, vertical_offset, scale, true, false); // <--- ADDED 'false'
             }
-            render_cube(GL_CCW, buffers_windows, vp, 0.0f, scale, true);  // ← true = windows
+            render_cube(GL_CCW, buffers_windows, vp, 0.0f, scale, true, false); // <--- ADDED 'false'
             
             // FRONT FACES - Windows for all rows
             for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
             {
                 float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-                render_cube(GL_CW, buffers_windows_rows[row], vp, vertical_offset, scale, true);  // ← true = windows
+                render_cube(GL_CW, buffers_windows_rows[row], vp, vertical_offset, scale, true, false); // <--- ADDED 'false'
             }
-            render_cube(GL_CW, buffers_windows, vp, 0.0f, scale, true);  // ← true = windows
+            render_cube(GL_CW, buffers_windows, vp, 0.0f, scale, true, false); // <--- ADDED 'false'
         }
 
         // ============================================
