@@ -80,6 +80,12 @@ bool has_virtual_hit = false;
 int hit_workspace_x = -1; // Which workspace (horizontal index) is at the raycast point
 int hit_workspace_y = -1; // Which workspace row is at the raycast point
 float plane_z = 0.0f;
+// Sync camera_y to Z progress so all axes interpolate together
+bool sync_cam_y_to_z = false;
+float sync_start_cam_y = 0;
+float sync_end_cam_y = 0;
+float sync_start_z = 0;
+float sync_end_z = 0;
 // Helper function to check if a workspace has any visible windows or window parts on it
 bool workspace_has_windows(int ws_x, int ws_y) {
     auto ws_set = output->wset();
@@ -485,9 +491,6 @@ auto bbox = self->get_bounding_box();
     }
    
     // Render window-only workspaces dynamically (top row)
-   // In schedule_instructions, for the window rendering:
-// In schedule_instructions, fix the render target geometry:
-// In schedule_instructions, for window rendering:
 for (int i = 0; i < (int)ws_instance_managers_windows.size(); i++)
 {
     const float scale = self->cube->output->handle->scale;
@@ -509,18 +512,12 @@ for (int i = 0; i < (int)ws_instance_managers_windows.size(); i++)
     std::vector<wf::scene::render_instance_uptr> fresh_instances;
     std::vector<wf::scene::render_instance_uptr>* instances_ptr;
    
- // if (self->cube->is_dragging_window)
     {
         // Regenerate instances manually to capture current window positions
         auto dummy_damage = [](wf::region_t){};
         self->regenerate_workspace_instances(i, fresh_instances, dummy_damage);
         instances_ptr = &fresh_instances;
     }
- // else
- // {
-        // Use cached instances when not dragging
- // instances_ptr = &ws_instance_managers_windows[i]->get_instances();
- // }
    
     // Force full damage to ensure complete redraw
     wf::region_t full_damage = fb_target.geometry;
@@ -580,18 +577,12 @@ for (int row = 0; row < (int)ws_instance_managers_windows_rows.size(); row++)
         std::vector<wf::scene::render_instance_uptr> fresh_instances;
         std::vector<wf::scene::render_instance_uptr>* instances_ptr;
        
-       // if (self->cube->is_dragging_window)
         {
             // Regenerate instances manually to capture current window positions
             auto dummy_damage = [](wf::region_t){};
             self->regenerate_workspace_instances_row(row, i, fresh_instances, dummy_damage);
             instances_ptr = &fresh_instances;
         }
-      // else
-      // {
-            // Use cached instances when not dragging
-      // instances_ptr = &ws_instance_managers_windows_rows[row][i]->get_instances();
-      // }
        
         // Force full damage to ensure complete redraw
         wf::region_t full_damage = fb_target.geometry;
@@ -831,16 +822,7 @@ private:
     wf::option_wrapper_t<double> XVelocity{"vertical_expo/speed_spin_horiz"},
     YVelocity{"vertical_expo/speed_spin_vert"}, ZVelocity{"vertical_expo/speed_zoom"};
     wf::option_wrapper_t<double> zoom_opt{"vertical_expo/zoom"};
-// wf::option_wrapper_t<bool> enable_window_popout{"vertical_expo/enable_window_popout"};
- // wf::option_wrapper_t<double> popout_scale{"vertical_expo/popout_scale"}; // e.g., 1.15 = 15% larger
-  // wf::option_wrapper_t<double> popout_opacity{"vertical_expo/popout_opacity"}; // 0.0 to 1.0
     OpenGL::program_t cap_program; // Separate program for caps
-  // wf::option_wrapper_t<bool> enable_caps{"vertical_expo/enable_caps"};
-   // wf::option_wrapper_t<double> cap_alpha{"vertical_expo/cap_alpha"};
-  // wf::option_wrapper_t<wf::color_t> cap_color_top{"vertical_expo/cap_color_top"};
-  // wf::option_wrapper_t<wf::color_t> cap_color_bottom{"vertical_expo/cap_color_bottom"};
-  // wf::option_wrapper_t<std::string> cap_texture_top{"vertical_expo/cap_texture_top"};
-  // wf::option_wrapper_t<std::string> cap_texture_bottom{"vertical_expo/cap_texture_bottom"};
     wf::option_wrapper_t<bool> tron{"vertical_expo/tron"};
     wf::option_wrapper_t<bool> star_background{"vertical_expo/star_background"};
     OpenGL::program_t background_program;
@@ -866,7 +848,7 @@ private:
      * for the given FOV */
     float identity_z_offset;
     // Camera vertical position for viewing different cube rows
-    wf::animation::simple_animation_t camera_y_offset{wf::create_option<int>(300)};
+    wf::animation::simple_animation_t camera_y_offset{wf::create_option<int>(600)};
     OpenGL::program_t program;
     OpenGL::program_t window_program;
     OpenGL::program_t cursor_program;
@@ -929,6 +911,70 @@ private:
         }
         return centers;
     }
+
+    // Helper: calculate the rotation needed to center the grid horizontally
+    float calculate_center_rotation()
+    {
+        auto g = output->wset()->get_workspace_grid_size();
+        // Faces are at x = 0, CUBE_SPACING, 2*CUBE_SPACING, ...
+        // Center is at x = ((n-1)/2) * CUBE_SPACING
+        // x_offset = i*CUBE_SPACING + (rotation/side_angle)*CUBE_SPACING
+        // To center: ((n-1)/2)*CUBE_SPACING + (rotation/side_angle)*CUBE_SPACING = 0
+        // rotation = -((n-1)/2) * side_angle
+        return -((g.width - 1) / 2.0f) * animation.side_angle;
+    }
+
+    // Helper: calculate the camera Y offset needed to center the grid vertically
+    float calculate_center_camera_y()
+    {
+        auto g = output->wset()->get_workspace_grid_size();
+        // Rows are at y = 0, |CUBE_VERTICAL_SPACING|, 2*|CUBE_VERTICAL_SPACING|, ...
+        // Center is at y = ((h-1)/2) * |CUBE_VERTICAL_SPACING|
+        // camera_y_offset shifts world, so negative = look at positive Y
+        float center_y = ((g.height - 1) / 2.0f) * std::abs(CUBE_VERTICAL_SPACING);
+        return -center_y;
+    }
+
+    // Helper: calculate the Z offset needed to fit the entire grid on screen
+    float calculate_overview_z()
+    {
+        auto g = output->wset()->get_workspace_grid_size();
+        // Total extent of grid in world units (include face size ~1.0)
+        float total_width = (g.width - 1) * CUBE_SPACING + 1.0f;
+        float total_height = (g.height - 1) * std::abs(CUBE_VERTICAL_SPACING) + 1.0f;
+
+        // Projection is perspective(45deg, aspect=1.0)
+        // At distance d, visible half-height = d * tan(22.5deg)
+        // The output_transform maps to actual screen, so account for screen aspect
+        float half_fov = glm::radians(22.5f);
+        auto output_geometry = output->get_layout_geometry();
+        float screen_aspect = (float)output_geometry.width / output_geometry.height;
+
+        // Need visible height >= total_height: d * tan(half_fov) * 2 >= total_height
+        // Need visible width >= total_width:  d * tan(half_fov) * 2 * screen_aspect >= total_width
+        float d_for_height = (total_height / 2.0f) / std::tan(half_fov);
+        float d_for_width = (total_width / 2.0f) / (std::tan(half_fov) * screen_aspect);
+        float required_distance = std::max(d_for_height, d_for_width);
+
+        // Add 5% padding for a snug fit
+        required_distance *= 1.05f;
+
+        // The camera-to-face distance = offset_z (see update_view_matrix)
+        // Faces are at z = identity_z_offset in world space
+        // So offset_z = required_distance (the offset_z IS the distance in this coordinate system)
+        float overview_z = required_distance + identity_z_offset;
+
+        // Ensure at least as far as normal close-up view
+        overview_z = std::max(overview_z, identity_z_offset + Z_OFFSET_NEAR + 1.0f);
+
+        LOGI("calculate_overview_z: grid=", g.width, "x", g.height,
+             " total_size=", total_width, "x", total_height,
+             " required_dist=", required_distance,
+             " overview_z=", overview_z);
+
+        return overview_z;
+    }
+
   public:
     void init() override
     {
@@ -940,7 +986,7 @@ private:
         animation.cube_animation.zoom.set(1, 1);
         animation.cube_animation.ease_deformation.set(0, 0);
         animation.cube_animation.max_tilt.set(0, 0); // Start with no tilt
-        LOGI("########## CONSTRUCTOR: max_tilt initialized to 0° ##########");
+        LOGI("########## CONSTRUCTOR: max_tilt initialized to 0 ##########");
         animation.cube_animation.start();
        
         camera_y_offset.set(0, 0);
@@ -1001,26 +1047,19 @@ int raycast_to_cube_face(glm::vec3 ray_dir, glm::vec3 ray_origin)
         glm::vec4 face_normal_world = model * face_normal_local;
         glm::vec3 normal = glm::normalize(glm::vec3(face_normal_world));
        
-        // Plane equation: dot(normal, point - center) = 0
-        // Ray: point = origin + t * direction
-        // Solve: dot(normal, origin + t*dir - center) = 0
-       
         float denom = glm::dot(normal, ray_dir);
-        if (std::abs(denom) > 1e-6) // Not parallel
+        if (std::abs(denom) > 1e-6)
         {
             glm::vec3 p0_to_center = glm::vec3(face_center_world) - ray_origin;
             float t = glm::dot(p0_to_center, normal) / denom;
            
-            if (t >= 0 && t < closest_distance) // In front of camera
+            if (t >= 0 && t < closest_distance)
             {
-                // Check if intersection point is within face bounds
                 glm::vec3 intersection = ray_origin + t * ray_dir;
                
-                // Transform intersection to face local coordinates
                 glm::mat4 inv_model = glm::inverse(model);
                 glm::vec4 local_pos = inv_model * glm::vec4(intersection, 1.0f);
                
-                // Face is 1x1 square from -0.5 to 0.5 in X and Y
                 if (std::abs(local_pos.x) <= 0.5f && std::abs(local_pos.y) <= 0.5f)
                 {
                     closest_distance = t;
@@ -1042,7 +1081,7 @@ struct HitInfo
     wf::point_t ws = {-1, -1};
     float t = std::numeric_limits<float>::max();
     glm::vec2 local_uv = {0.0f, 0.0f};
-    int row_offset = 0; // Relative row offset from current
+    int row_offset = 0;
 };
 Ray screen_to_world_ray(float screen_x, float screen_y, wf::output_t *output)
 {
@@ -1052,45 +1091,50 @@ Ray screen_to_world_ray(float screen_x, float screen_y, wf::output_t *output)
     float ndc_x = 2.0f * screen_x / w - 1.0f;
     float ndc_y = 1.0f - 2.0f * screen_y / h;
     glm::vec4 clip_near(ndc_x, ndc_y, -1.0f, 1.0f);
-    // Current projection and view
     glm::mat4 proj = animation.projection;
     glm::mat4 inv_proj = glm::inverse(proj);
     glm::vec4 eye_near4 = inv_proj * clip_near;
     eye_near4 /= eye_near4.w;
     glm::vec3 eye_dir(eye_near4);
-    // Compute centered_scale
     float zoom_factor = animation.cube_animation.zoom;
     auto scale_matrix = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f / zoom_factor));
     auto to_row_center = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, camera_y_offset, 0.0f));
     auto from_row_center = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -camera_y_offset, 0.0f));
     auto centered_scale = from_row_center * scale_matrix * to_row_center;
-    // view_cs = animation.view * centered_scale
     glm::mat4 view_cs = animation.view * centered_scale;
     glm::mat4 inv_view_cs = glm::inverse(view_cs);
-    // Camera origin in world space
     glm::vec4 eye_pos(0.0f, 0.0f, 0.0f, 1.0f);
     glm::vec4 cam4 = inv_view_cs * eye_pos;
     cam4 /= cam4.w;
     glm::vec3 origin = glm::vec3(cam4);
-    // Direction in world space
     glm::vec4 eye_dir4(eye_dir.x, eye_dir.y, eye_dir.z, 0.0f);
     glm::vec4 dir4 = inv_view_cs * eye_dir4;
     glm::vec3 dir = glm::normalize(glm::vec3(dir4));
-    // OFFSET RAY ORIGIN DOWN BY GRID HEIGHT
     auto grid = output->wset()->get_workspace_grid_size();
     float grid_height = (grid.height - 1) * std::abs(CUBE_VERTICAL_SPACING);
-    origin.y -= grid_height; // Move ray origin down by grid height
+    origin.y -= grid_height;
     return {origin, dir};
 }
-// Get current window Z offset based on zoom level (interpolates during animation)
 float get_window_z_offset()
 {
-    float zoom_factor = animation.cube_animation.zoom;
-    zoom_factor = std::max(0.0f, std::min(1.0f, zoom_factor));
-    // Interpolate: zoom=0 (cube view) -> 0.2, zoom=1 (normal view) -> 0.01
-    return 0.2f * (1.0f - zoom_factor) + 0.01f * zoom_factor;
+    // Use offset_z to determine how "zoomed out" we are
+    // Close view (near_z) → small offset (windows flush with desktop)
+    // Overview (far_z) → large offset (windows pop out from desktop)
+    float near_z = identity_z_offset + Z_OFFSET_NEAR;
+    float far_z = calculate_overview_z();
+    float current_z = animation.cube_animation.offset_z;
+
+    // Normalize: 0 = fully zoomed in, 1 = fully zoomed out
+    float t = 0.0f;
+    if (far_z > near_z)
+    {
+        t = (current_z - near_z) / (far_z - near_z);
+        t = std::max(0.0f, std::min(1.0f, t));
+    }
+
+    // Interpolate: close = 0.01, overview = 0.2
+    return 0.01f * (1.0f - t) + 0.2f * t;
 }
-// Helper function: raycast at window layer depth (0.2 units forward)
 HitInfo raycast_at_window_depth(const glm::vec3& ray_origin, const glm::vec3& ray_dir, wf::output_t *output)
 {
     HitInfo hit;
@@ -1098,13 +1142,12 @@ HitInfo raycast_at_window_depth(const glm::vec3& ray_origin, const glm::vec3& ra
     auto grid = output->wset()->get_workspace_grid_size();
     int num_cols = grid.width;
     int num_rows = grid.height;
-    // Test current row with window layer offset
     {
         float v_offset = 0.0f;
         for (int tx = 0; tx < num_cols; ++tx)
         {
             int face_i = tx;
-            auto model = calculate_model_matrix(face_i, v_offset, 1.0f, true); // true = window layer
+            auto model = calculate_model_matrix(face_i, v_offset, 1.0f, true);
             glm::vec4 center_local(0.0f, 0.0f, 0.0f, 1.0f);
             glm::vec4 center_world4 = model * center_local;
             glm::vec3 center = glm::vec3(center_world4 / center_world4.w);
@@ -1112,17 +1155,14 @@ HitInfo raycast_at_window_depth(const glm::vec3& ray_origin, const glm::vec3& ra
             glm::vec4 normal_world4 = model * normal_local;
             glm::vec3 normal = glm::normalize(glm::vec3(normal_world4));
             float denom = glm::dot(normal, ray_dir);
-            if (std::abs(denom) < 1e-6f)
-                continue;
+            if (std::abs(denom) < 1e-6f) continue;
             float t = glm::dot(center - ray_origin, normal) / denom;
-            if (t < 0.0f || t >= hit.t)
-                continue;
+            if (t < 0.0f || t >= hit.t) continue;
             glm::vec3 intersection = ray_origin + t * ray_dir;
             glm::mat4 inv_model = glm::inverse(model);
             glm::vec4 local4 = inv_model * glm::vec4(intersection, 1.0f);
             glm::vec3 local = glm::vec3(local4 / local4.w);
-            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f)
-                continue;
+            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f) continue;
             int abs_tx = (cws.x + tx) % num_cols;
             int abs_ty = cws.y;
             hit.ws = {abs_tx, abs_ty};
@@ -1132,7 +1172,6 @@ HitInfo raycast_at_window_depth(const glm::vec3& ray_origin, const glm::vec3& ra
             hit.row_offset = 0;
         }
     }
-    // Test other rows
     for (int row_offset = 1; row_offset < num_rows; ++row_offset)
     {
         int abs_ty = (cws.y + row_offset) % num_rows;
@@ -1140,7 +1179,7 @@ HitInfo raycast_at_window_depth(const glm::vec3& ray_origin, const glm::vec3& ra
         for (int tx = 0; tx < num_cols; ++tx)
         {
             int face_i = tx;
-            auto model = calculate_model_matrix(face_i, v_offset, 1.0f, true); // true = window layer
+            auto model = calculate_model_matrix(face_i, v_offset, 1.0f, true);
             glm::vec4 center_local(0.0f, 0.0f, 0.0f, 1.0f);
             glm::vec4 center_world4 = model * center_local;
             glm::vec3 center = glm::vec3(center_world4 / center_world4.w);
@@ -1148,17 +1187,14 @@ HitInfo raycast_at_window_depth(const glm::vec3& ray_origin, const glm::vec3& ra
             glm::vec4 normal_world4 = model * normal_local;
             glm::vec3 normal = glm::normalize(glm::vec3(normal_world4));
             float denom = glm::dot(normal, ray_dir);
-            if (std::abs(denom) < 1e-6f)
-                continue;
+            if (std::abs(denom) < 1e-6f) continue;
             float t = glm::dot(center - ray_origin, normal) / denom;
-            if (t < 0.0f || t >= hit.t)
-                continue;
+            if (t < 0.0f || t >= hit.t) continue;
             glm::vec3 intersection = ray_origin + t * ray_dir;
             glm::mat4 inv_model = glm::inverse(model);
             glm::vec4 local4 = inv_model * glm::vec4(intersection, 1.0f);
             glm::vec3 local = glm::vec3(local4 / local4.w);
-            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f)
-                continue;
+            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f) continue;
             int abs_tx = (cws.x + tx) % num_cols;
             hit.ws = {abs_tx, abs_ty};
             hit.t = t;
@@ -1176,40 +1212,27 @@ HitInfo raycast_to_workspace(const glm::vec3& ray_origin, const glm::vec3& ray_d
     auto grid = output->wset()->get_workspace_grid_size();
     int num_cols = grid.width;
     int num_rows = grid.height;
-    // Test current row (v_offset = 0)
     {
         float v_offset = 0.0f;
         for (int tx = 0; tx < num_cols; ++tx)
         {
             int face_i = tx;
             auto model = calculate_model_matrix(face_i, v_offset, 1.0f, false);
-            // Plane center
             glm::vec4 center_local(0.0f, 0.0f, 0.0f, 1.0f);
             glm::vec4 center_world4 = model * center_local;
             glm::vec3 center = glm::vec3(center_world4 / center_world4.w);
-            // Plane normal
             glm::vec4 normal_local(0.0f, 0.0f, 1.0f, 0.0f);
             glm::vec4 normal_world4 = model * normal_local;
             glm::vec3 normal = glm::normalize(glm::vec3(normal_world4));
             float denom = glm::dot(normal, ray_dir);
-            if (std::abs(denom) < 1e-6f)
-            {
-                continue;
-            }
+            if (std::abs(denom) < 1e-6f) continue;
             float t = glm::dot(center - ray_origin, normal) / denom;
-            if (t < 0.0f || t >= hit.t)
-            {
-                continue;
-            }
+            if (t < 0.0f || t >= hit.t) continue;
             glm::vec3 intersection = ray_origin + t * ray_dir;
             glm::mat4 inv_model = glm::inverse(model);
             glm::vec4 local4 = inv_model * glm::vec4(intersection, 1.0f);
             glm::vec3 local = glm::vec3(local4 / local4.w);
-            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f)
-            {
-                continue;
-            }
-            // Valid hit
+            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f) continue;
             int abs_tx = (cws.x + tx) % num_cols;
             int abs_ty = cws.y;
             hit.ws = {abs_tx, abs_ty};
@@ -1219,43 +1242,29 @@ HitInfo raycast_to_workspace(const glm::vec3& ray_origin, const glm::vec3& ray_d
             hit.row_offset = 0;
         }
     }
-    // Test other rows (positive y direction only, matching rendered layout)
     for (int row_offset = 1; row_offset < num_rows; ++row_offset)
     {
         int abs_ty = (cws.y + row_offset) % num_rows;
-        // Fixed: Use positive spacing with negative sign for downward stacking
         float v_offset = -static_cast<float>(row_offset) * CUBE_SPACING;
         for (int tx = 0; tx < num_cols; ++tx)
         {
             int face_i = tx;
             auto model = calculate_model_matrix(face_i, v_offset, 1.0f, false);
-            // Plane center
             glm::vec4 center_local(0.0f, 0.0f, 0.0f, 1.0f);
             glm::vec4 center_world4 = model * center_local;
             glm::vec3 center = glm::vec3(center_world4 / center_world4.w);
-            // Plane normal
             glm::vec4 normal_local(0.0f, 0.0f, 1.0f, 0.0f);
             glm::vec4 normal_world4 = model * normal_local;
             glm::vec3 normal = glm::normalize(glm::vec3(normal_world4));
             float denom = glm::dot(normal, ray_dir);
-            if (std::abs(denom) < 1e-6f)
-            {
-                continue;
-            }
+            if (std::abs(denom) < 1e-6f) continue;
             float t = glm::dot(center - ray_origin, normal) / denom;
-            if (t < 0.0f || t >= hit.t)
-            {
-                continue;
-            }
+            if (t < 0.0f || t >= hit.t) continue;
             glm::vec3 intersection = ray_origin + t * ray_dir;
             glm::mat4 inv_model = glm::inverse(model);
             glm::vec4 local4 = inv_model * glm::vec4(intersection, 1.0f);
             glm::vec3 local = glm::vec3(local4 / local4.w);
-            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f)
-            {
-                continue;
-            }
-            // Valid hit
+            if (std::abs(local.x) > 0.5f || std::abs(local.y) > 0.5f || std::abs(local.z) > 1e-3f) continue;
             int abs_tx = (cws.x + tx) % num_cols;
             hit.ws = {abs_tx, abs_ty};
             hit.t = t;
@@ -1266,7 +1275,6 @@ HitInfo raycast_to_workspace(const glm::vec3& ray_origin, const glm::vec3& ray_d
     }
     return hit;
 }
-// Modified function to use virtual cursor
 wayfire_toplevel_view find_window_at_cursor_on_face(wf::pointf_t virtual_cursor, const wf::point_t& target_ws)
 {
     LOGI("=== find_window_at_cursor_on_face ===");
@@ -1274,9 +1282,6 @@ wayfire_toplevel_view find_window_at_cursor_on_face(wf::pointf_t virtual_cursor,
     LOGI("Virtual cursor at: ", virtual_cursor.x, ",", virtual_cursor.y);
    
     auto ws_set = output->wset();
-   
-    // Get all views - check ALL windows, not just those on target workspace
-    // This handles windows that span across multiple workspaces
     auto all_views = ws_set->get_views();
     LOGI("Total views: ", all_views.size());
    
@@ -1284,28 +1289,16 @@ wayfire_toplevel_view find_window_at_cursor_on_face(wf::pointf_t virtual_cursor,
    
     for (auto& view : all_views)
     {
-        if (!view->is_mapped())
-        {
-            continue;
-        }
-       
+        if (!view->is_mapped()) continue;
         auto tview = wf::toplevel_cast(view);
-        if (!tview)
-        {
-            continue;
-        }
-       
-        // Get view geometry
+        if (!tview) continue;
         auto geom = tview->get_geometry();
-       
         LOGI("View '", tview->get_title(), "' at geom(", geom.x, ",", geom.y, " ", geom.width, "x", geom.height, ")");
-       
-        // Check if virtual cursor is within bounds
         if (virtual_cursor.x >= geom.x && virtual_cursor.x <= geom.x + geom.width &&
             virtual_cursor.y >= geom.y && virtual_cursor.y <= geom.y + geom.height)
         {
             auto view_ws = ws_set->get_view_main_workspace(view);
-            LOGI(" ✓ FOUND window! Main WS: (", view_ws.x, ",", view_ws.y, "), Click WS: (", target_ws.x, ",", target_ws.y, ")");
+            LOGI(" HIT window! Main WS: (", view_ws.x, ",", view_ws.y, "), Click WS: (", target_ws.x, ",", target_ws.y, ")");
             return tview;
         }
     }
@@ -1313,7 +1306,6 @@ wayfire_toplevel_view find_window_at_cursor_on_face(wf::pointf_t virtual_cursor,
     LOGI("No window found on face");
     return nullptr;
 }
-// Updated handle_pointer_button
 void handle_pointer_button(const wlr_pointer_button_event& event) override
 {
     if (event.button == BTN_LEFT)
@@ -1324,14 +1316,9 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
             auto cursor = wf::get_core().get_cursor_position();
             last_cursor_pos = cursor;
             drag_start_cursor = cursor;
-           
             wf::get_core().unhide_cursor();
-           
-            // 3D raycasting
             auto bbox = output->get_layout_geometry();
             Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
-           
-            // Always compute virtual hit on the infinite plane
             if (std::abs(ray.dir.z) > 1e-6f) {
                 float t = (plane_z - ray.origin.z) / ray.dir.z;
                 if (t > 0.0f) {
@@ -1343,80 +1330,41 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
             } else {
                 has_virtual_hit = false;
             }
-           
             HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
-           
             if (hit.ws.x >= 0)
             {
                 LOGI("Hit workspace (", hit.ws.x, ",", hit.ws.y, ") at UV (", hit.local_uv.x, ",", hit.local_uv.y, ")");
-                LOGI("Bbox dimensions: ", bbox.width, "x", bbox.height);
-               
-                // ============================================================
-                // UPDATE CURSOR INDICATOR - Shows where raycasting hit
-                // ============================================================
                 cursor_indicator.active = true;
                 cursor_indicator.workspace_x = hit.ws.x;
                 cursor_indicator.workspace_y = hit.ws.y;
                 cursor_indicator.uv_position = hit.local_uv;
                 cursor_indicator.world_position = ray.origin + hit.t * ray.dir;
-                // Sync virtual hit with actual hit when bounded
                 virtual_ray_hit_pos = cursor_indicator.world_position;
-                // ============================================================
-               
-                // Compute virtual cursor - add workspace offset to get absolute position
-                // Since we're raycasting at window depth, we need to
-                // apply perspective correction to match where windows are actually positioned
                 float window_offset = get_window_z_offset();
                 float perspective_scale = plane_z / (plane_z + window_offset);
-               
-                // Scale UV from center
                 float centered_uv_x = hit.local_uv.x - 0.5f;
                 float centered_uv_y = hit.local_uv.y - 0.5f;
                 float corrected_uv_x = (centered_uv_x * perspective_scale) + 0.5f;
                 float corrected_uv_y = (centered_uv_y * perspective_scale) + 0.5f;
-               
                 float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
                 float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);
                 wf::pointf_t virtual_cursor{virtual_x, virtual_y};
-               
                 LOGI("Virtual cursor (with WS offset): (", virtual_x, ",", virtual_y, ")");
-                LOGI("Hit UV: (", hit.local_uv.x, ",", hit.local_uv.y, ")");
-                LOGI("Corrected UV: (", corrected_uv_x, ",", corrected_uv_y, ")");
-                LOGI("Window offset: ", window_offset, ", Perspective scale: ", perspective_scale);
-                LOGI("Cursor indicator updated at workspace (", hit.ws.x, ",", hit.ws.y, ")");
-               
-                // Find window using virtual cursor
                 dragged_view = find_window_at_cursor_on_face(virtual_cursor, hit.ws);
-               
-                dragged_window_face_index = hit.ws.x; // Keep for compatibility, now absolute
-               
+                dragged_window_face_index = hit.ws.x;
                 is_dragging_window = true;
-               
                 if (dragged_view)
                 {
                     auto ws = output->wset()->get_view_main_workspace(dragged_view);
                     drag_start_workspace = ws;
-                   
-                    // Store the offset from the window position to where the cursor clicked
                     auto geom = dragged_view->get_geometry();
                     drag_offset.x = virtual_cursor.x - geom.x;
                     drag_offset.y = virtual_cursor.y - geom.y;
-                   
-                    // ============================================================
-                    // WOBBLY: Start wobbly effect when grabbing window
-                    // ============================================================
                     start_wobbly(dragged_view, virtual_cursor.x, virtual_cursor.y);
-                   
-                    // Calculate relative grab position for wobbly
                     relative_grab_position.x = drag_offset.x / (double)geom.width;
                     relative_grab_position.y = drag_offset.y / (double)geom.height;
-                    // ============================================================
-                   
-                    LOGI("✓ Dragging '", dragged_view->get_title(), "' on WS (",
+                    LOGI("Dragging '", dragged_view->get_title(), "' on WS (",
                          hit.ws.x, ",", hit.ws.y, ")");
-                    LOGI(" Window at (", geom.x, ",", geom.y, "), cursor at (",
-                         virtual_cursor.x, ",", virtual_cursor.y, "), offset (",
-                         drag_offset.x, ",", drag_offset.y, ")");
                 }
                 else
                 {
@@ -1425,102 +1373,65 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
             }
             else
             {
-                LOGI("✗ No face hit");
+                LOGI("No face hit");
                 is_dragging_window = false;
                 cursor_indicator.active = false;
-               
-                // Still have virtual hit for smooth tilt
             }
         }
        else if (event.state == WL_POINTER_BUTTON_STATE_RELEASED)
         {
             LOGI("Mouse released");
-           
             if (is_dragging_window)
             {
-                // ============================================================
-                // WOBBLY: End wobbly effect before moving window
-                // ============================================================
                 if (dragged_view)
                 {
-                    // End the wobbly effect
                     end_wobbly(dragged_view);
-                   
-                    // Get final position for wobbly rebuild
                     auto cursor = wf::get_core().get_cursor_position();
                     Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
                     HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
-                   
                     if (hit.ws.x >= 0)
                     {
                         auto bbox = output->get_layout_geometry();
                         float window_offset = get_window_z_offset();
                         float perspective_scale = plane_z / (plane_z + window_offset);
-                       
                         float centered_uv_x = hit.local_uv.x - 0.5f;
                         float centered_uv_y = hit.local_uv.y - 0.5f;
                         float corrected_uv_x = (centered_uv_x * perspective_scale) + 0.5f;
                         float corrected_uv_y = (centered_uv_y * perspective_scale) + 0.5f;
-                       
                         float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
                         float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);
                         wf::point_t final_position{(int)virtual_x, (int)virtual_y};
-                       
-                        // Rebuild wobbly with final position
-                     // rebuild_wobbly(dragged_view, final_position, relative_grab_position);
-                       
-                        // Translate back to output-local coordinates
                         translate_wobbly(dragged_view,
                             -wf::origin(dragged_view->get_output()->get_layout_geometry()));
                     }
-                    // ============================================================
-                   
-                    // Before clearing the drag state, move the window to the correct workspace
                     auto ws_set = output->wset();
                     auto current_ws = ws_set->get_view_main_workspace(dragged_view);
                     auto window_geom = dragged_view->get_geometry();
                     auto output_geom = output->get_layout_geometry();
                     auto grid = ws_set->get_workspace_grid_size();
-                   
-                    // Calculate which workspace the window center is on
                     int center_x = window_geom.x + window_geom.width / 2;
                     int center_y = window_geom.y + window_geom.height / 2;
-                   
                     wf::point_t target_ws;
                     target_ws.x = center_x / output_geom.width;
                     target_ws.y = center_y / output_geom.height;
-                   
-                    // Clamp to grid bounds
                     target_ws.x = std::max(0, std::min(target_ws.x, grid.width - 1));
                     target_ws.y = std::max(0, std::min(target_ws.y, grid.height - 1));
-                   
                     LOGI("Window center at (", center_x, ",", center_y, ") -> workspace (",
                          target_ws.x, ",", target_ws.y, ")");
-                   
-                    // Move window to target workspace if different
                     if (target_ws != current_ws)
                     {
                         ws_set->move_to_workspace(dragged_view, target_ws);
-                       
-                        // Adjust window geometry to be relative to the new workspace
                         wf::geometry_t adjusted_geom = window_geom;
                         adjusted_geom.x = window_geom.x - (target_ws.x * output_geom.width);
                         adjusted_geom.y = window_geom.y - (target_ws.y * output_geom.height);
-                       
                         dragged_view->set_geometry(adjusted_geom);
-                       
                         LOGI("Moved window from workspace (", current_ws.x, ",", current_ws.y,
                              ") to (", target_ws.x, ",", target_ws.y, ")");
-                        LOGI("Adjusted geometry to (", adjusted_geom.x, ",", adjusted_geom.y, ")");
                     }
                 }
-               
                 is_dragging_window = false;
                 dragged_view = nullptr;
                 dragged_window_face_index = -1;
-               
-                // Don't deactivate on left-click release anymore
-                // User can now use right-click to exit
             }
         }
     }
@@ -1529,62 +1440,31 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
         if (event.state == WL_POINTER_BUTTON_STATE_PRESSED)
         {
             LOGI("Right-click - detecting target workspace");
-           
-            // Get cursor position and raycast to find which workspace we're hovering
             auto cursor = wf::get_core().get_cursor_position();
             Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
-           
-            // Use desktop layer raycasting (not window layer) to detect workspace faces
             HitInfo hit = raycast_to_workspace(ray.origin, ray.dir, output);
-           
             if (hit.ws.x >= 0)
             {
                 LOGI("Right-click on workspace (", hit.ws.x, ",", hit.ws.y, ")");
-               
                 auto ws_set = output->wset();
                 auto current_ws = ws_set->get_current_workspace();
-               
-                // Calculate workspace delta
                 int dx = hit.ws.x - current_ws.x;
                 int dy = hit.ws.y - current_ws.y;
-               
                 LOGI("Delta: dx=", dx, ", dy=", dy);
-               
-                // Switch to target workspace first
-               // ws_set->set_workspace(wf::point_t{hit.ws.x, hit.ws.y});
-               
-                // Mark that workspace is already set, so deactivate() doesn't switch again
                 workspace_already_set = true;
-               
-                // Now manually set up the exit animation
                 animation.in_exit = true;
-               
-                // Calculate target rotation: we want to rotate TO the target workspace
-                // Current rotation represents where we are, we need to add the delta
+                sync_cam_y_to_z = false; // Disable Z-sync; right-click uses its own camera_y animation
                 float current_rotation = animation.cube_animation.rotation;
-                float rotation_delta = -dx * animation.side_angle; // Negative because right is negative rotation
+                float rotation_delta = -dx * animation.side_angle;
                 float target_rotation = current_rotation + rotation_delta;
-               
-                // But input_ungrabbed expects rotation to already represent the workspace
-                // So we need to set it to what it WOULD be for that workspace
-                // Then input_ungrabbed will align it to 0
                 target_rotation = -hit.ws.x * animation.side_angle;
-               
                 animation.cube_animation.rotation.set(current_rotation, target_rotation);
-               
                 LOGI("Rotation: current=", current_rotation, ", target=", target_rotation);
-               
-                // Handle vertical offset
-                // CUBE_VERTICAL_SPACING is already negative (-1.2), so no need for extra minus
                 float target_y = static_cast<float>(hit.ws.y) * CUBE_VERTICAL_SPACING;
                 camera_y_offset.animate(target_y);
-               
-                // Reset other attributes
                 reset_attribs();
-               
                 popout_scale_animation.animate(1.01);
                 animation.cube_animation.start();
-               
                 update_view_matrix();
                 output->render->schedule_redraw();
             }
@@ -1593,16 +1473,11 @@ void handle_pointer_button(const wlr_pointer_button_event& event) override
                 LOGI("Right-click in void - exiting to current workspace");
                 input_ungrabbed();
             }
-           
-            // Disable cursor indicator when exiting
             cursor_indicator.active = false;
         }
     }
-   
-    // Force redraw to update cursor indicator
     output->render->schedule_redraw();
 }
-// Add this new helper function to move windows:
 void move_window_to_target_workspace(float dx, float dy)
 {
     if (!dragged_view)
@@ -1610,222 +1485,90 @@ void move_window_to_target_workspace(float dx, float dy)
         LOGI("No dragged view!");
         return;
     }
-   
     auto grid = output->wset()->get_workspace_grid_size();
-   
     LOGI("=== WINDOW DRAG ANALYSIS ===");
-    LOGI("Drag delta: dx=", dx, " dy=", dy);
-    LOGI("Start workspace: (", drag_start_workspace.x, ",", drag_start_workspace.y, ")");
-    LOGI("Grid size: ", grid.width, "x", grid.height);
-   
-    // Calculate workspace offset based on drag direction
     int workspace_offset_x = 0;
     int workspace_offset_y = 0;
-   
-    // Thresholds
     float horizontal_threshold = 100.0f;
     float vertical_threshold = 100.0f;
-   
-    // CRITICAL: The cube uses HORIZONTAL layout (workspaces side-by-side)
-    // So horizontal drag (dx) should change HORIZONTAL workspace (x)
-    // And vertical drag (dy) should change VERTICAL workspace (y)
-   
-    // HORIZONTAL DRAG (left/right) → Change workspace X
-    if (std::abs(dx) > horizontal_threshold)
-    {
-        // Dragging RIGHT (+dx) should move to workspace on the RIGHT (+x)
-        // Dragging LEFT (-dx) should move to workspace on the LEFT (-x)
-        workspace_offset_x = (dx > 0) ? 1 : -1;
-        LOGI("→ Horizontal drag: offset_x = ", workspace_offset_x);
-    }
-   
-    // VERTICAL DRAG (up/down) → Change workspace Y
-    if (std::abs(dy) > vertical_threshold)
-    {
-        // IMPORTANT: Check if your Y-axis is inverted
-        // Screen coordinates: +Y = DOWN
-        // Workspace grid: +Y might be UP or DOWN depending on your layout
-       
-        // Option 1: If workspace Y increases going DOWN (row below)
-        workspace_offset_y = (dy > 0) ? 1 : -1; // +dy = move down = +y
-       
-        // Option 2: If workspace Y increases going UP (row above)
-        // workspace_offset_y = (dy > 0) ? -1 : 1; // +dy = move down = -y
-       
-        LOGI("↕ Vertical drag: offset_y = ", workspace_offset_y);
-    }
-   
-    // If dragged diagonally, choose the STRONGER direction
-    if (workspace_offset_x != 0 && workspace_offset_y != 0)
-    {
-        if (std::abs(dx) > std::abs(dy))
-        {
-            // Horizontal is stronger - only move horizontally
-            workspace_offset_y = 0;
-            LOGI("Diagonal drag: choosing HORIZONTAL (stronger)");
-        }
-        else
-        {
-            // Vertical is stronger - only move vertically
-            workspace_offset_x = 0;
-            LOGI("Diagonal drag: choosing VERTICAL (stronger)");
-        }
-    }
-   
-    LOGI("Final offset: (", workspace_offset_x, ",", workspace_offset_y, ")");
-   
-    // Calculate new workspace coordinates
-    int new_workspace_x = drag_start_workspace.x + workspace_offset_x;
-    int new_workspace_y = drag_start_workspace.y + workspace_offset_y;
-   
-    // Clamp to valid range
-    new_workspace_x = wf::clamp(new_workspace_x, 0, grid.width - 1);
-    new_workspace_y = wf::clamp(new_workspace_y, 0, grid.height - 1);
-   
-    LOGI("Target workspace (before clamp): (",
-         drag_start_workspace.x + workspace_offset_x, ",",
-         drag_start_workspace.y + workspace_offset_y, ")");
-    LOGI("Target workspace (after clamp): (", new_workspace_x, ",", new_workspace_y, ")");
-   
-    // Check if workspace actually changed
-    if (new_workspace_x == drag_start_workspace.x &&
-        new_workspace_y == drag_start_workspace.y)
-    {
-        LOGI("✗ No workspace change (same position or hit grid edge)");
-        return;
-    }
-   
-    wf::point_t new_ws = {new_workspace_x, new_workspace_y};
-    LOGI("✓ Moving window '", dragged_view->get_title(), "' to workspace (",
-         new_ws.x, ",", new_ws.y, ")");
-   
-    // Move the window
-    output->wset()->move_to_workspace(dragged_view, new_ws);
-   
-    // Force redraw
-    output->render->schedule_redraw();
-   
-    LOGI("=== MOVE COMPLETE ===");
-}
-wayfire_toplevel_view find_window_at_cursor(wf::pointf_t cursor)
-{
-    LOGI("=== find_window_at_cursor ===");
-    LOGI("Cursor at: ", cursor.x, ",", cursor.y);
-   
-    auto ws_set = output->wset();
-    auto current_ws = ws_set->get_current_workspace();
-   
-    LOGI("Current workspace: ", current_ws.x, ",", current_ws.y);
-   
-    // Get all views
-    auto all_views = ws_set->get_views();
-    LOGI("Total views: ", all_views.size());
-   
-    // Prioritize views on current workspace
-    wayfire_toplevel_view best_match = nullptr;
-   
-    for (auto& view : all_views)
-    {
-        if (!view->is_mapped())
-        {
-            continue;
-        }
-       
-        auto tview = wf::toplevel_cast(view);
-        if (!tview)
-        {
-            continue;
-        }
-       
-        // Get view workspace
-        auto view_ws = ws_set->get_view_main_workspace(view);
-       
-        // Get view geometry
-        auto geom = tview->get_geometry();
-       
-        LOGI("View '", tview->get_title(), "' at ws(", view_ws.x, ",", view_ws.y,
-             ") geom(", geom.x, ",", geom.y, " ", geom.width, "x", geom.height, ")");
-       
-        // Check if cursor is within bounds
-        if (cursor.x >= geom.x && cursor.x <= geom.x + geom.width &&
-            cursor.y >= geom.y && cursor.y <= geom.y + geom.height)
-        {
-            // Prefer windows on current workspace
-            if (view_ws.x == current_ws.x && view_ws.y == current_ws.y)
-            {
-                LOGI(" ✓ FOUND on current workspace!");
-                return tview;
-            }
-           
-            // Otherwise, save as potential match
-            if (!best_match)
-            {
-                best_match = tview;
-                LOGI(" ~ Potential match (different workspace)");
-            }
-        }
-    }
-   
-    if (best_match)
-    {
-        LOGI("Returning best match: '", best_match->get_title(), "'");
-    }
-    else
-    {
-        LOGI("No window found at cursor");
-    }
-   
-    return best_match;
-}
-void finalize_window_drag()
-{
-    if (!dragged_view || !is_dragging_window)
-    {
-        return;
-    }
-   
-    auto cursor = wf::get_core().get_cursor_position();
-    float dx = cursor.x - drag_start_cursor.x;
-    float dy = cursor.y - drag_start_cursor.y;
-   
-    // Calculate workspace offset based on drag distance
-    int workspace_offset_x = 0;
-    int workspace_offset_y = 0;
-   
-    // Threshold for workspace change (adjust as needed)
-    float horizontal_threshold = 150.0f;
-    float vertical_threshold = 150.0f;
-   
     if (std::abs(dx) > horizontal_threshold)
     {
         workspace_offset_x = (dx > 0) ? 1 : -1;
     }
-   
     if (std::abs(dy) > vertical_threshold)
     {
         workspace_offset_y = (dy > 0) ? 1 : -1;
     }
-   
-    // Calculate new workspace
+    if (workspace_offset_x != 0 && workspace_offset_y != 0)
+    {
+        if (std::abs(dx) > std::abs(dy))
+            workspace_offset_y = 0;
+        else
+            workspace_offset_x = 0;
+    }
+    int new_workspace_x = drag_start_workspace.x + workspace_offset_x;
+    int new_workspace_y = drag_start_workspace.y + workspace_offset_y;
+    new_workspace_x = wf::clamp(new_workspace_x, 0, grid.width - 1);
+    new_workspace_y = wf::clamp(new_workspace_y, 0, grid.height - 1);
+    if (new_workspace_x == drag_start_workspace.x &&
+        new_workspace_y == drag_start_workspace.y)
+    {
+        return;
+    }
+    wf::point_t new_ws = {new_workspace_x, new_workspace_y};
+    LOGI("Moving window '", dragged_view->get_title(), "' to workspace (",
+         new_ws.x, ",", new_ws.y, ")");
+    output->wset()->move_to_workspace(dragged_view, new_ws);
+    output->render->schedule_redraw();
+}
+wayfire_toplevel_view find_window_at_cursor(wf::pointf_t cursor)
+{
+    auto ws_set = output->wset();
+    auto current_ws = ws_set->get_current_workspace();
+    auto all_views = ws_set->get_views();
+    wayfire_toplevel_view best_match = nullptr;
+    for (auto& view : all_views)
+    {
+        if (!view->is_mapped()) continue;
+        auto tview = wf::toplevel_cast(view);
+        if (!tview) continue;
+        auto view_ws = ws_set->get_view_main_workspace(view);
+        auto geom = tview->get_geometry();
+        if (cursor.x >= geom.x && cursor.x <= geom.x + geom.width &&
+            cursor.y >= geom.y && cursor.y <= geom.y + geom.height)
+        {
+            if (view_ws.x == current_ws.x && view_ws.y == current_ws.y)
+                return tview;
+            if (!best_match)
+                best_match = tview;
+        }
+    }
+    return best_match;
+}
+void finalize_window_drag()
+{
+    if (!dragged_view || !is_dragging_window) return;
+    auto cursor = wf::get_core().get_cursor_position();
+    float dx = cursor.x - drag_start_cursor.x;
+    float dy = cursor.y - drag_start_cursor.y;
+    int workspace_offset_x = 0;
+    int workspace_offset_y = 0;
+    float horizontal_threshold = 150.0f;
+    float vertical_threshold = 150.0f;
+    if (std::abs(dx) > horizontal_threshold)
+        workspace_offset_x = (dx > 0) ? 1 : -1;
+    if (std::abs(dy) > vertical_threshold)
+        workspace_offset_y = (dy > 0) ? 1 : -1;
     auto grid = output->wset()->get_workspace_grid_size();
     int new_workspace_x = drag_start_workspace.x + workspace_offset_x;
     int new_workspace_y = drag_start_workspace.y + workspace_offset_y;
-   
-    // Clamp to valid workspace range
     new_workspace_x = wf::clamp(new_workspace_x, 0, grid.width - 1);
     new_workspace_y = wf::clamp(new_workspace_y, 0, grid.height - 1);
-   
-    // Only move if workspace changed
     if (new_workspace_x != drag_start_workspace.x ||
         new_workspace_y != drag_start_workspace.y)
     {
         wf::point_t new_ws = {new_workspace_x, new_workspace_y};
-        LOGI("Moving window to workspace ", new_ws.x, ",", new_ws.y);
-       
         output->wset()->move_to_workspace(dragged_view, new_ws);
-       
-        // Reload cube to show updated positions
-        //reload_buffers();
         output->render->schedule_redraw();
     }
 }
@@ -1848,15 +1591,13 @@ void load_program()
     if (!tessellation_support)
     {
         program.set_simple(OpenGL::compile_program(cube_vertex_2_0, cube_fragment_2_0));
-        window_program.set_simple(OpenGL::compile_program(cube_vertex_2_0, cube_fragment_2_0)); // Same for windows
+        window_program.set_simple(OpenGL::compile_program(cube_vertex_2_0, cube_fragment_2_0));
         cap_program.set_simple(OpenGL::compile_program(cube_cap_vertex, cube_cap_fragment));
         cursor_program.set_simple(OpenGL::compile_program(cursor_vertex_shader, cursor_fragment_shader));
-        // NEW: Load beam program
         beam_program.set_simple(OpenGL::compile_program(beam_vertex_shader, beam_fragment_shader));
     } else
     {
 #ifdef USE_GLES32
-        // Desktop backgrounds - full tessellation shader
         auto id = GL_CALL(glCreateProgram());
         GLuint vss, fss, tcs, tes, gss;
         vss = OpenGL::compile_shader(cube_vertex_3_2, GL_VERTEX_SHADER);
@@ -1864,7 +1605,6 @@ if (!tron)
         {fss = OpenGL::compile_shader(cube_fragment_3_2, GL_FRAGMENT_SHADER);}
 if (tron)
         {fss = OpenGL::compile_shader(cube_fragment_3_2_tron, GL_FRAGMENT_SHADER);}
-       
         tcs = OpenGL::compile_shader(cube_tcs_3_2, GL_TESS_CONTROL_SHADER);
         tes = OpenGL::compile_shader(cube_tes_3_2, GL_TESS_EVALUATION_SHADER);
         gss = OpenGL::compile_shader(cube_geometry_3_2, GL_GEOMETRY_SHADER);
@@ -1880,14 +1620,11 @@ if (tron)
         GL_CALL(glDeleteShader(tcs));
         GL_CALL(glDeleteShader(tes));
         GL_CALL(glDeleteShader(gss));
-       
         program.set_simple(id);
-       
- 
-       // Windows - simple shader (original fragment shader, no tessellation)
+
 auto window_id = GL_CALL(glCreateProgram());
 GLuint win_vss, win_fss;
-win_vss = OpenGL::compile_shader(cube_vertex_3_2_simple, GL_VERTEX_SHADER); // Use simple vertex
+win_vss = OpenGL::compile_shader(cube_vertex_3_2_simple, GL_VERTEX_SHADER);
 win_fss = OpenGL::compile_shader(cube_fragment_3_2_orginal, GL_FRAGMENT_SHADER);
 GL_CALL(glAttachShader(window_id, win_vss));
 GL_CALL(glAttachShader(window_id, win_fss));
@@ -1896,39 +1633,26 @@ GL_CALL(glUseProgram(window_id));
 GL_CALL(glDeleteShader(win_vss));
 GL_CALL(glDeleteShader(win_fss));
 window_program.set_simple(window_id);
-       
         cap_program.set_simple(OpenGL::compile_program(cube_cap_vertex, cube_cap_fragment));
-       
-        // ========================================
-        // FIX: Add cursor program here too!
-        // ========================================
         cursor_program.set_simple(OpenGL::compile_program(cursor_vertex_shader, cursor_fragment_shader));
-        // NEW: Load beam program
         beam_program.set_simple(OpenGL::compile_program(beam_vertex_shader, beam_fragment_shader));
 #endif
     }
-    // Load background shader program
     background_program.set_simple(OpenGL::compile_program(
         background_vertex_shader, background_fragment_shader));
-   
-// Create circle VBO for cursor
+
 if (cursor_vbo == 0)
 {
     const int segments = 32;
     std::vector<GLfloat> circle_vertices;
-   
-    // Center point
     circle_vertices.push_back(0.0f);
     circle_vertices.push_back(0.0f);
-   
-    // Circle points
     for (int i = 0; i <= segments; i++)
     {
         float angle = (float)i / segments * 2.0f * M_PI;
         circle_vertices.push_back(cos(angle));
         circle_vertices.push_back(sin(angle));
     }
-   
     GL_CALL(glGenBuffers(1, &cursor_vbo));
     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cursor_vbo));
     GL_CALL(glBufferData(GL_ARRAY_BUFFER,
@@ -1937,7 +1661,6 @@ if (cursor_vbo == 0)
                          GL_STATIC_DRAW));
     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
 }
-    // Create fullscreen quad VBO for background
     if (background_vbo == 0)
     {
         static const GLfloat quad_vertices[] = {
@@ -1946,7 +1669,6 @@ if (cursor_vbo == 0)
             -1.0f, 1.0f,
              1.0f, 1.0f
         };
-       
         GL_CALL(glGenBuffers(1, &background_vbo));
         GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, background_vbo));
         GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices),
@@ -1957,35 +1679,22 @@ if (cursor_vbo == 0)
 }
 void render_shader_background(const wf::render_target_t& target)
 {
-    if (background_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0)
-    {
-        return;
-    }
-   
-    // Render with depth test, but write max depth
+    if (background_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0) return;
     GL_CALL(glEnable(GL_DEPTH_TEST));
-    GL_CALL(glDepthFunc(GL_LEQUAL)); // Use LEQUAL
+    GL_CALL(glDepthFunc(GL_LEQUAL));
     GL_CALL(glDepthMask(GL_TRUE));
-   
     background_program.use(wf::TEXTURE_TYPE_RGBA);
-   
     static auto start_time = std::chrono::steady_clock::now();
     auto current_time = std::chrono::steady_clock::now();
     float elapsed = std::chrono::duration<float>(current_time - start_time).count();
     background_program.uniform1f("u_time", elapsed);
-   
     auto geom = output->get_layout_geometry();
     background_program.uniform2f("u_resolution", (float)geom.width, (float)geom.height);
-   
     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, background_vbo));
     background_program.attrib_pointer("position", 2, 0, nullptr);
-   
     GL_CALL(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
-   
     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
     background_program.deactivate();
-   
-    // Restore GL_LESS for cube
     GL_CALL(glDepthFunc(GL_LESS));
 }
     wf::signal::connection_t<cube_control_signal> on_cube_control = [=] (cube_control_signal *d)
@@ -2006,23 +1715,20 @@ void render_shader_background(const wf::render_target_t& target)
             return;
         }
         float offset_z = identity_z_offset + Z_OFFSET_NEAR;
-       
-        // Tilt stays at 180° during cube mode, regardless of zoom level
         float tilt_angle = glm::radians(180.0f);
-       
-        LOGI("########## rotate_and_zoom_cube: Setting max_tilt to 180° ##########");
+        LOGI("########## rotate_and_zoom_cube: Setting max_tilt to 180 ##########");
         animation.cube_animation.rotation.set(angle, angle);
         animation.cube_animation.zoom.set(zoom, zoom);
         animation.cube_animation.ease_deformation.set(ease, ease);
         animation.cube_animation.offset_y.set(0, 0);
         animation.cube_animation.offset_z.set(offset_z, offset_z);
-        animation.cube_animation.max_tilt.set(tilt_angle, tilt_angle); // Always 180° in cube mode
-       
-        LOGI("After set: max_tilt=", glm::degrees((float)animation.cube_animation.max_tilt), "°");
+        animation.cube_animation.max_tilt.set(tilt_angle, tilt_angle);
+        LOGI("After set: max_tilt=", glm::degrees((float)animation.cube_animation.max_tilt), " deg");
         animation.cube_animation.start();
         update_view_matrix();
         output->render->schedule_redraw();
     }
+
     /* Tries to initialize renderer, activate plugin, etc. */
     bool activate()
     {
@@ -2042,56 +1748,79 @@ void render_shader_background(const wf::render_target_t& target)
    
     // Reset workspace flag when plugin activates
     workspace_already_set = false;
+
+    // IMPORTANT: Save which workspace we're on BEFORE resetting to {0,0}
+    auto active_ws = output->wset()->get_current_workspace();
+    LOGI("Activating from workspace (", active_ws.x, ",", active_ws.y, ")");
+
  output->wset()->set_workspace({0, 0});
         render_node = std::make_shared<cube_render_node_t>(this);
         wf::scene::add_front(wf::get_core().scene(), render_node);
         output->render->add_effect(&pre_hook, wf::OUTPUT_EFFECT_PRE);
         output->render->set_require_depth_buffer(true);
         output->wset()->set_workspace({0, 0});
-      // wf::get_core().hide_cursor();
         input_grab->grab_input(wf::scene::layer::OVERLAY);
         auto wsize = output->wset()->get_workspace_grid_size();
         animation.side_angle = 2 * M_PI / float(wsize.width);
         identity_z_offset = 0.5 / std::tan(animation.side_angle / 2);
         if (wsize.width == 1)
         {
-            // tan(M_PI) is 0, so identity_z_offset is invalid
             identity_z_offset = 0.0f;
         }
 plane_z = identity_z_offset;
+
 // Calculate optimal zoom to fit entire grid
-auto g = output->wset()->get_workspace_grid_size();
-// Calculate actual grid dimensions in world space
-float grid_width = (g.width - 1) * CUBE_SPACING;
-float grid_height = (g.height - 1) * CUBE_SPACING;
-// Calculate required Z distance to see full grid
-float fov = glm::radians(45.0f);
-auto output_geometry = output->get_layout_geometry();
-float aspect = (float)output_geometry.width / output_geometry.height;
-float required_z_for_height = grid_height / (2.0f * std::tan(fov / 2.0f));
-float required_z_for_width = grid_width / (2.0f * aspect * std::tan(fov / 2.0f));
-float required_z = std::max(required_z_for_height, required_z_for_width) * CUBE_SPACING;
-// Start zoomed out to show full grid
-// When cube is active, tilt is always at 180° regardless of zoom level
-// Tilt only interpolates to 0° during the exit animation
-float initial_zoom = 0.1f; // Start mostly zoomed out
-float initial_tilt = glm::radians(180.0f); // Always 180° while cube is active
+float overview_z = calculate_overview_z();
+float center_rot = calculate_center_rotation();
+float center_cam_y = calculate_center_camera_y();
+
+// ======================================================================
+// ZOOM OUT FROM ACTIVE DESKTOP:
+// Use the exact same formulas as the right-click zoom-IN code (reversed).
+// Right-click targets: rotation = -ws.x * side_angle, camera_y = ws.y * CUBE_VERTICAL_SPACING
+// Here we START at those values and animate TO the centered overview.
+// ======================================================================
+// Same formula as right-click: rotation = -ws.x * side_angle
+float start_rot = -(float)active_ws.x * animation.side_angle;
+
+// Same formula as right-click: camera_y = ws.y * CUBE_VERTICAL_SPACING
+// (CUBE_VERTICAL_SPACING is -1.2, so ws.y=1 gives -1.2)
+float start_cam_y = static_cast<float>(active_ws.y) * CUBE_VERTICAL_SPACING;
+
+float start_z = identity_z_offset + Z_OFFSET_NEAR; // Close to desktop
+
 LOGI("=================================================================");
-LOGI("CUBE ACTIVATE: initial_zoom=", initial_zoom, " initial_tilt_deg=", glm::degrees(initial_tilt));
+LOGI("CUBE ACTIVATE: from ws(", active_ws.x, ",", active_ws.y, ")");
+LOGI("  rot: ", start_rot, " -> ", center_rot);
+LOGI("  cam_y: ", start_cam_y, " -> ", center_cam_y);
+LOGI("  Z: ", start_z, " -> ", overview_z);
 LOGI("=================================================================");
-animation.cube_animation.zoom.set(initial_zoom, initial_zoom);
-animation.cube_animation.rotation.set(0, 0);
+
+// Set cube_animation start/end values (all animate together via cube_animation.start())
+animation.cube_animation.zoom.set(1.0f, 1.0f);
+animation.cube_animation.rotation.set(start_rot, center_rot);
 animation.cube_animation.offset_y.set(0, 0);
-animation.cube_animation.offset_z.set(required_z, required_z);
+animation.cube_animation.offset_z.set(start_z, overview_z);
 animation.cube_animation.ease_deformation.set(0, 0);
-animation.cube_animation.max_tilt.set(initial_tilt, initial_tilt); // 180° while in cube mode
+animation.cube_animation.max_tilt.set(0, glm::radians(180.0f));
+animation.cube_animation.start();
+
+// Sync camera_y to offset_z progress so X, Y, Z all interpolate together
+// through the same easing curve at the same rate
+sync_cam_y_to_z = true;
+sync_start_cam_y = start_cam_y;
+sync_end_cam_y = center_cam_y;
+sync_start_z = start_z;
+sync_end_z = overview_z;
+camera_y_offset.set(start_cam_y, start_cam_y); // Snap to start; pre_hook will drive it
+
 LOGI("After setting animations: zoom=", (float)animation.cube_animation.zoom,
-     " max_tilt=", glm::degrees((float)animation.cube_animation.max_tilt), "°");
+     " offset_z=", (float)animation.cube_animation.offset_z,
+     " max_tilt=", glm::degrees((float)animation.cube_animation.max_tilt), " deg");
        
 reload_background();
        
         popout_scale_animation.animate(1.0, 1.2);
-        // Force a full redraw to clear any stale state
         output->render->damage_whole();
        
         return true;
@@ -2101,148 +1830,95 @@ reload_background();
         float dx = -animation.cube_animation.rotation / animation.side_angle;
         return std::floor(dx + 0.5);
     }
-// Add this method to calculate which row we're currently viewing
 int calculate_viewport_dy_from_camera()
 {
-    // Calculate which cube row the camera is focused on
-    // Each row is offset by CUBE_VERTICAL_SPACING
     float dy = -camera_y_offset / (-CUBE_VERTICAL_SPACING);
     return std::floor(dy + 0.5);
 }
-// Modified deactivate() method
 void deactivate()
 {
     if (!output->is_plugin_active(grab_interface.name))
     {
         return;
     }
-    // Animate popout scale back to 1.0
-  // popout_scale_animation.animate(1.0);
-   
-    // Don't actually deactivate until animation finishes
-   // animation.in_exit = true;
-
     is_dragging_window = false;
     dragged_view = nullptr;
     wf::scene::remove_child(render_node);
     output->render->damage_whole();
     render_node = nullptr;
     output->render->rem_effect(&pre_hook);
-  // output->render->set_require_depth_buffer(false);
     input_grab->ungrab_input();
     output->deactivate_plugin(&grab_interface);
     wf::get_core().unhide_cursor();
     on_motion_event.disconnect();
-    /* Figure out how much we have rotated and switch workspace */
-    // Only calculate and switch if workspace wasn't already set (e.g., by right-click)
-   // if (!workspace_already_set)
     {
         int size = get_num_faces();
         int dvx = calculate_viewport_dx_from_rotation();
-       
-        // NEW: Calculate vertical workspace change based on camera position
         int dvy = calculate_viewport_dy_from_camera();
         auto cws = output->wset()->get_current_workspace();
         auto grid = output->wset()->get_workspace_grid_size();
-       
         int nvx = (cws.x + (dvx % size) + size) % size;
         int nvy = (cws.y + dvy) % grid.height;
-       
-        // Clamp to valid workspace range
         nvy = std::max(0, std::min(nvy, grid.height - 1));
-       
         output->wset()->set_workspace({nvx, nvy});
     }
-   
-    // Reset the flag for next time
     workspace_already_set = false;
+sync_cam_y_to_z = false;
 has_virtual_hit = false;
 virtual_ray_hit_pos = {0.0f, 0.0f, 0.0f};
-    /* We are finished with rotation, make sure the next time cube is used
-     * it is properly reset */
-  // animation.cube_animation.rotation.set(0, 0);
- // camera_y_offset.set(0, 0); // Reset camera position
 }
 bool move_vp_vertical(int dir)
 {
     bool was_active = output->is_plugin_active(grab_interface.name);
-   
     if (!was_active && !activate())
     {
         return false;
     }
-   
     animation.in_exit = false;
-   
-    // Get grid dimensions
     auto grid = output->wset()->get_workspace_grid_size();
-   
-    // Calculate actual grid extents in world space
     float grid_width = (grid.width - 1) * CUBE_SPACING;
     float grid_height = (grid.height - 1) * CUBE_SPACING;
-   
-    // Calculate CENTER of the grid
     float center_x = grid_width / 2.0f;
     float center_y = grid_height / 2.0f;
-   
-    // Calculate required Z distance to see full grid
     float fov = glm::radians(45.0f);
     auto output_geometry = output->get_layout_geometry();
     float aspect = (float)output_geometry.width / output_geometry.height;
-   
     float required_z_for_height = grid_height / (2.0f * std::tan(fov / 2.0f));
     float required_z_for_width = grid_width / (2.0f * aspect * std::tan(fov / 2.0f));
     float required_z = std::max(required_z_for_height, required_z_for_width) * 1.1f;
-   
-    // Center horizontally using rotation
     float center_rotation = -(center_x / CUBE_SPACING) * animation.side_angle;
-   
-    // Position camera BELOW the grid center so when looking straight, grid is centered
-    // Since camera looks at Y=camera_y_offset on the z-plane, we want it at 0 to see center_y content
+    sync_cam_y_to_z = false;
     camera_y_offset.animate(-center_y);
-   
     animation.cube_animation.zoom.restart_with_end(1.0f);
     animation.cube_animation.rotation.restart_with_end(center_rotation);
     animation.cube_animation.offset_y.restart_with_end(0);
     animation.cube_animation.offset_z.restart_with_end(required_z);
     animation.cube_animation.ease_deformation.restart_with_end(0);
-    animation.cube_animation.max_tilt.restart_with_end(glm::radians(45.0f)); // Set tilt to 180° in cube mode
-   
-    LOGI("########## move_vp_vertical: Setting max_tilt to 180° ##########");
-   
+    animation.cube_animation.max_tilt.restart_with_end(glm::radians(45.0f));
+    LOGI("########## move_vp_vertical: Setting max_tilt ##########");
     animation.cube_animation.start();
     update_view_matrix();
     output->render->schedule_redraw();
     return true;
 }
-// Modified reset_attribs to maintain camera position during transitions
 void reset_attribs()
 {
     float current_tilt = animation.cube_animation.max_tilt;
-   
-    LOGI("reset_attribs: Animating tilt from ", glm::degrees(current_tilt), "° to 0°");
-   
+    LOGI("reset_attribs: Animating tilt from ", glm::degrees(current_tilt), " deg to 0 deg");
     animation.cube_animation.zoom.restart_with_end(1.0);
     animation.cube_animation.offset_z.restart_with_end(
         identity_z_offset + Z_OFFSET_NEAR);
     animation.cube_animation.offset_y.restart_with_end(0);
     animation.cube_animation.ease_deformation.restart_with_end(0);
-    animation.cube_animation.max_tilt.restart_with_end(0); // Interpolate tilt to 0 during exit
-    // Don't reset camera_y_offset here - let it maintain position until deactivate
+    animation.cube_animation.max_tilt.restart_with_end(0);
 }
-    /* Start moving to a workspace to the left/right using the keyboard */
     bool move_vp(int dir)
     {
         if (!activate())
         {
             return false;
         }
-        /* After the rotation is done, we want to exit cube and focus the target
-         * workspace */
         animation.in_exit = false;
-        /* Set up rotation target to the next workspace in the given direction,
-         * and reset other attribs */
-      // reset_attribs();
         animation.cube_animation.rotation.restart_with_end(
             animation.cube_animation.rotation.end - dir * animation.side_angle);
         animation.cube_animation.start();
@@ -2250,54 +1926,74 @@ void reset_attribs()
         output->render->schedule_redraw();
         return true;
     }
-    /* Initiate with an button grab. */
+    /* Initiate with a button grab. */
     bool input_grabbed()
     {
+        bool was_active = output->is_plugin_active(grab_interface.name);
         if (!activate())
         {
             return false;
         }
-        /* Rotations, offset_y and zoom stay as they are now, as they have been
-         * grabbed.
-         * offset_z changes to the default one.
-         *
-         * We also need to make sure the cube gets deformed */
         animation.in_exit = false;
-        float current_rotation = animation.cube_animation.rotation;
-        float current_offset_y = animation.cube_animation.offset_y;
-        float current_zoom = animation.cube_animation.zoom;
             wf::get_core().unhide_cursor();
     cursor_hidden_by_cube = false;
-        animation.cube_animation.rotation.set(current_rotation, current_rotation);
-        animation.cube_animation.offset_y.set(current_offset_y, current_offset_y);
-        animation.cube_animation.offset_z.restart_with_end(
-            zoom_opt + identity_z_offset + Z_OFFSET_NEAR);
-        animation.cube_animation.zoom.set(current_zoom, current_zoom);
-        animation.cube_animation.ease_deformation.restart_with_end(1);
-        animation.cube_animation.start();
+
+        if (was_active)
+        {
+            /* ================================================================
+             * When already active, animate TO the overview showing all desktops.
+             * zoom stays at 1.0 (zoom<1 zooms IN due to scale=1/zoom).
+             * offset_z moves camera back. rotation+camera_y center the grid.
+             * ================================================================ */
+            float current_rotation = animation.cube_animation.rotation;
+            float current_offset_y = animation.cube_animation.offset_y;
+            float current_z = animation.cube_animation.offset_z;
+            float current_tilt = animation.cube_animation.max_tilt;
+            float current_zoom = animation.cube_animation.zoom;
+
+            float overview_z = calculate_overview_z();
+            float center_rot = calculate_center_rotation();
+            float center_cam_y = calculate_center_camera_y();
+
+            animation.cube_animation.rotation.set(current_rotation, center_rot);
+            animation.cube_animation.offset_y.set(current_offset_y, 0);
+            animation.cube_animation.offset_z.set(current_z, overview_z);
+            animation.cube_animation.zoom.set(current_zoom, 1.0f);
+            animation.cube_animation.ease_deformation.set(
+                (float)animation.cube_animation.ease_deformation, 0);
+            animation.cube_animation.max_tilt.set(current_tilt, glm::radians(180.0f));
+            animation.cube_animation.start();
+
+            // Sync camera_y to offset_z progress for perfectly smooth interpolation
+            float current_cam_y = camera_y_offset;
+            sync_cam_y_to_z = true;
+            sync_start_cam_y = current_cam_y;
+            sync_end_cam_y = center_cam_y;
+            sync_start_z = current_z;
+            sync_end_z = overview_z;
+            camera_y_offset.set(current_cam_y, current_cam_y);
+        }
+
         update_view_matrix();
         output->render->schedule_redraw();
-        // Let the button go to the input grab
         return false;
     }
     /* Mouse grab was released */
     void input_ungrabbed()
     {
         animation.in_exit = true;
-        /* Rotate cube so that selected workspace aligns with the output */
+        sync_cam_y_to_z = false; // Disable Z-sync; exit uses its own camera_y animation
         float current_rotation = animation.cube_animation.rotation;
         int dvx = calculate_viewport_dx_from_rotation();
         animation.cube_animation.rotation.set(current_rotation,
             -dvx * animation.side_angle);
-        /* And reset other attributes, again to align the workspace with the output
-         * */
         reset_attribs();
-        popout_scale_animation.animate(1.01); //longer time to fix screen glitch
+        camera_y_offset.animate(0); // Animate camera back to origin for exit
+        popout_scale_animation.animate(1.01);
         animation.cube_animation.start();
         update_view_matrix();
         output->render->schedule_redraw();
     }
-    /* Update the view matrix used in the next frame */
     void update_view_matrix()
     {
         auto zoom_translate = glm::translate(glm::mat4(1.f),
@@ -2305,7 +2001,6 @@ void reset_attribs()
         auto rotation = glm::rotate(glm::mat4(1.0),
             (float)animation.cube_animation.offset_y,
             glm::vec3(1., 0., 0.));
-        // Apply camera vertical offset for viewing different cube rows
         auto camera_vertical = glm::translate(glm::mat4(1.0),
             glm::vec3(0.f, camera_y_offset, 0.f));
         auto view = glm::lookAt(glm::vec3(0., 0., 0.),
@@ -2321,141 +2016,94 @@ void reset_attribs()
 glm::mat4 calculate_vp_matrix(const wf::render_target_t& dest)
 {
     float zoom_factor = animation.cube_animation.zoom;
-   
-    // NEW: Build scale with row-centered translation wrapper
     auto scale_matrix = glm::scale(glm::mat4(1.0),
         glm::vec3(1. / zoom_factor, 1. / zoom_factor, 1. / zoom_factor));
-    // NEW: Translate scene so current row is at Y=0 for zoom, scale, then translate back
     auto to_row_center = glm::translate(glm::mat4(1.0), glm::vec3(0.0f, camera_y_offset, 0.0f));
     auto from_row_center = glm::translate(glm::mat4(1.0), glm::vec3(0.0f, -camera_y_offset, 0.0f));
     auto centered_scale = from_row_center * scale_matrix * to_row_center;
-    // Compose: projection * view * centered_scale (applies row-focused zoom)
     return output_transform(dest) * animation.projection * animation.view * centered_scale;
 }
-// Helper function for smoothstep (add this as a member function or static inline in the class)
 float smoothstep(float edge0, float edge1, float x) {
     float t = glm::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
-// Change the signature to take a float depth index
 glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f, float scale = 1.0f, bool is_window_layer = false, float layer_depth_index = 0.0f)
 {
-    // *** NEW: LAYERED DEPTH SETUP ***
-    // Set the total number of layers for the depth effect (including the main face at 0)
-    const float NUM_DEPTH_LAYERS = 40.0f; // 0.0, 0.2, 0.4, 0.6, 0.8...
-    const float MAX_RECESSED_Z = 1.0f; // The deepest plane will be at Z=-0.5f
-   
+    const float NUM_DEPTH_LAYERS = 40.0f;
+    const float MAX_RECESSED_Z = 1.0f;
     const float INITIAL_PANE_TILT = glm::radians(0.0f);
-   
-    // Determine the Z-shift based on the index.
     float z_shift = 0.0f;
-   
     if (layer_depth_index > 0.0f) {
-        // Calculate a Z-offset from the main plane (z=0)
-        // Layer 1.0 -> Z=-0.1, Layer 5.0 -> Z=-0.5 (or similar, depending on how you index it)
-        // NOTE: We invert the index so layer 1 is shallowest, layer 5 is deepest.
         float normalized_depth = (layer_depth_index / NUM_DEPTH_LAYERS);
         z_shift = -(normalized_depth * MAX_RECESSED_Z);
     }
-   
-    // The original window_z_offset logic only applies to the dedicated window layer.
-    // The regular z_shift logic below handles the main desktop faces.
-    // ... (FLAT GRID LAYOUT / X_OFFSET calculation remains the same) ...
     float horizontal_spacing = CUBE_SPACING;
     float x_offset = (i * horizontal_spacing) + (animation.cube_animation.rotation / animation.side_angle) * horizontal_spacing;
-   
-    // Initial rotation (unconditional tilt for ALL planes)
     auto rotation = glm::mat4(1.0);
     {
         float tilt_direction = glm::sign(x_offset) * -1.0f;
         rotation = glm::rotate(glm::mat4(1.0f), tilt_direction * INITIAL_PANE_TILT, glm::vec3(0.0f, 1.0f, 0.0f));
     }
-   
-    // Calculate standard Z offsets (original logic)
     double additional_z = 0.0;
     if (get_num_faces() == 2) { additional_z = 1e-3; }
-   
-   // Interpolate window Z offset (preserved original meaning for window content)
    double window_z_offset = 0.0;
-    if (is_window_layer) // This remains for its original use: putting window content in front of its texture background
+    if (is_window_layer)
     {
-        float zoom_factor = animation.cube_animation.zoom;
-        zoom_factor = std::max(0.0f, std::min(1.0f, zoom_factor));
-        window_z_offset = 0.2 * (1.0 - zoom_factor) + 0.01 * zoom_factor;
-
+        // Use offset_z to determine popout depth (same logic as get_window_z_offset)
+        float near_z = identity_z_offset + Z_OFFSET_NEAR;
+        float far_z = near_z + 5.0f; // Approximate; avoid calling calculate_overview_z in hot path
+        float current_z = animation.cube_animation.offset_z;
+        float t = 0.0f;
+        if (far_z > near_z) {
+            t = (current_z - near_z) / (far_z - near_z);
+            t = std::max(0.0f, std::min(1.0f, t));
+        }
+        window_z_offset = 0.01 * (1.0 - t) + 0.2 * t;
     }
-   
-    // Apply translation using the calculated z_shift (now based on depth index)
     auto translation = glm::translate(glm::mat4(1.0),
         glm::vec3(x_offset, 0, identity_z_offset + additional_z + window_z_offset + z_shift));
-   
-   
-    // ... (scale_matrix and vertical_translation remain the same) ...
     auto scale_matrix = glm::scale(glm::mat4(1.0), glm::vec3(scale, scale, scale));
     auto vertical_translation = glm::translate(glm::mat4(1.0), glm::vec3(0, vertical_offset, 0));
-   
-    // Physics-based pivot/tilt logic (applies to ALL desktop planes, regardless of depth)
     glm::mat4 tilt = glm::mat4(1.0f);
     glm::mat4 pivot_rotation = glm::mat4(1.0f);
-   
-    // The tilt logic should apply if tilt is generally needed AND we are NOT drawing the window layer (since windows shouldn't tilt)
     bool is_desktop_layer = !is_window_layer;
-   
     bool should_apply_tilt = (animation.in_exit || has_virtual_hit) && is_desktop_layer;
-   
     if (should_apply_tilt) {
-        // ... (Original tilt and pivot logic runs here, identical to the last working version) ...
         auto cws = output->wset()->get_current_workspace();
         int this_workspace_x = i;
-       
         int row_offset = static_cast<int>(std::round(vertical_offset / std::abs(CUBE_VERTICAL_SPACING)));
         int this_workspace_y = cws.y + row_offset;
-       
         bool has_windows = workspace_has_windows(this_workspace_x, this_workspace_y);
-       
         if (!has_windows) {
             glm::vec3 hit_pos = animation.in_exit ? glm::vec3(0.0f, 0.0f, 0.0f) : virtual_ray_hit_pos;
-           
             float dx = x_offset - hit_pos.x;
             float dist_x = std::abs(dx);
-           
-            // Pivot Rotation
             const float inner_radius = 0.35f * CUBE_SPACING;
             const float outer_radius = 2.8f * CUBE_SPACING;
-           
             if (dist_x >= inner_radius && dist_x <= outer_radius) {
                 float t = (dist_x - inner_radius) / (outer_radius - inner_radius);
                 float rotation_strength = std::sin(t * M_PI);
                 float pivot_angle = rotation_strength * glm::radians(40.0f) * (dx > 0 ? 1.0f : -1.0f);
-               
                 if (!animation.in_exit) {
                     pivot_rotation = glm::rotate(glm::mat4(1.0f), pivot_angle, glm::vec3(0.0f, 1.0f, 0.0f));
                 }
             }
-           
-            // Tilt Effect
             const float max_ws_radius = 4.0f;
             const float ws_dist = dist_x / CUBE_SPACING;
-           
             bool in_tilt_range = animation.in_exit || (ws_dist > 1.0f && ws_dist <= max_ws_radius);
-           
             if (in_tilt_range) {
                 float tilt_factor = smoothstep(1.0f, max_ws_radius, ws_dist);
                 float max_tilt_rad = animation.cube_animation.max_tilt;
-               
                 if (dist_x > 1e-6f && tilt_factor > 0.0f && max_tilt_rad > 0.0f) {
                     float tilt_y = -(dx / dist_x) * max_tilt_rad * tilt_factor;
-                   
                     auto rot_y = glm::rotate(glm::mat4(1.0f), tilt_y, glm::vec3(0.0f, 1.0f, 0.0f));
                     tilt = rot_y;
                 }
             }
         }
     }
-   
     return vertical_translation * translation * tilt * pivot_rotation * scale_matrix * rotation;
 }
-    /* Render the sides of the cube, using the given culling mode - cw or ccw */
 void render_cube(GLuint front_face, std::vector<wf::auxilliary_buffer_t>& buffers,
                  const glm::mat4& vp,
                  float vertical_offset = 0.0f, float scale = 1.0f, bool is_window_layer = false, float layer_depth_index = 0.0f)
@@ -2463,33 +2111,19 @@ void render_cube(GLuint front_face, std::vector<wf::auxilliary_buffer_t>& buffer
     GL_CALL(glEnable(GL_DEPTH_TEST));
     GL_CALL(glDepthFunc(GL_LESS));
     GL_CALL(glDepthMask(GL_TRUE));
-
-    // Choose shader based on layer type
     auto& active_program = is_window_layer ? window_program : program;
     active_program.use(wf::TEXTURE_TYPE_RGBA);
-
     GL_CALL(glFrontFace(front_face));
     static const GLuint indexData[] = {0, 1, 2, 0, 2, 3};
-
     static GLfloat vertexData[] = {
-        -0.5, 0.5,
-        0.5, 0.5,
-        0.5, -0.5,
-        -0.5, -0.5
+        -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5
     };
-
     static GLfloat coordData[] = {
-        0.0f, 1.0f,
-        1.0f, 1.0f,
-        1.0f, 0.0f,
-        0.0f, 0.0f
+        0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f
     };
-
-    // attrib_pointer handles enabling vertex attributes
     active_program.attrib_pointer("position", 2, 0, vertexData);
     active_program.attrib_pointer("uvPosition", 2, 0, coordData);
     active_program.uniformMatrix4f("VP", vp);
-
 auto now = std::chrono::steady_clock::now();
 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
     now.time_since_epoch()).count();
@@ -2501,56 +2135,39 @@ if (time_loc >= 0) {
 }
 GLint brightness_loc = glGetUniformLocation(prog_id, "u_brightness");
 if (brightness_loc >= 0 && !is_window_layer) {
-    // Set default brightness (will be overridden per-face below)
     GL_CALL(glUniform1f(brightness_loc, 1.0f));
 }
-    // Set uniforms only for desktop shader (not window shader)
     if (!is_window_layer && tessellation_support)
     {
         active_program.uniform1i("deform", use_deform);
         active_program.uniform1i("light", use_light);
         active_program.uniform1f("ease", animation.cube_animation.ease_deformation);
-      
         GLuint prog_id = active_program.get_program_id(wf::TEXTURE_TYPE_RGBA);
         GLint loc = glGetUniformLocation(prog_id, "cameraYOffset");
-        if (loc >= 0)
-        {
-            GL_CALL(glUniform1f(loc, camera_y_offset));
-        }
-      
+        if (loc >= 0) GL_CALL(glUniform1f(loc, camera_y_offset));
         loc = glGetUniformLocation(prog_id, "cubeVerticalOffset");
-        if (loc >= 0)
-        {
-            GL_CALL(glUniform1f(loc, vertical_offset));
-        }
+        if (loc >= 0) GL_CALL(glUniform1f(loc, vertical_offset));
     }
-
     auto cws = output->wset()->get_current_workspace();
     auto grid = output->wset()->get_workspace_grid_size();
     int num_faces = get_num_faces();
     int row_offset = static_cast<int>(std::round(vertical_offset / std::abs(CUBE_VERTICAL_SPACING)));
-    int abs_row_y = (cws.y + row_offset + grid.height) % grid.height;  // Handle negative offsets
+    int abs_row_y = (cws.y + row_offset + grid.height) % grid.height;
     float zoom_factor = animation.cube_animation.zoom;
     for (int i = 0; i < num_faces; i++)
     {
         int index = (cws.x + i) % num_faces;
         auto tex_id = wf::gles_texture_t::from_aux(buffers[index]).tex_id;
-      
         GL_CALL(glBindTexture(GL_TEXTURE_2D, tex_id));
          auto model = calculate_model_matrix(i, vertical_offset, scale, is_window_layer, layer_depth_index);
         active_program.uniformMatrix4f("model", model);
-      
-        // NEW: Set per-face brightness for desktop layers only
       if (brightness_loc >= 0 && !is_window_layer) {
             int ws_x = (cws.x + i) % grid.width;
             int ws_y = abs_row_y;
             bool has_windows = workspace_has_windows(ws_x, ws_y);
             float base_brightness = has_windows ? prism_brightness : 1.3f;
-        //    float interpolated_brightness = 1.0f + (base_brightness - 1.0f) * (zoom_factor);
-        //    GL_CALL(glUniform1f(brightness_loc, interpolated_brightness));
         GL_CALL(glUniform1f(brightness_loc, base_brightness));
         }
-      
         if (tessellation_support && !is_window_layer)
         {
 #ifdef USE_GLES32
@@ -2563,119 +2180,73 @@ if (brightness_loc >= 0 && !is_window_layer) {
     }
 }
 void render_beam(const wf::scene::render_instruction_t& data, const glm::mat4& vp) {
-    if (beam_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0) {
-        return;
-    }
+    if (beam_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0) return;
     auto active_centers = get_active_workspace_centers();
-    
-    // Need at least 2 active workspaces to connect
-    if (active_centers.size() < 2) {
-        return;
-    }
-    
-    // Extract camera position from view-projection matrix
+    if (active_centers.size() < 2) return;
     glm::mat4 inv_vp = glm::inverse(vp);
     glm::vec4 cam_pos_4 = inv_vp * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     glm::vec3 camera_pos = glm::vec3(cam_pos_4) / cam_pos_4.w;
-    
-    // Generate quad geometry for each beam segment
     std::vector<GLfloat> vertices;
     std::vector<GLfloat> distances;
     std::vector<GLuint> indices;
-    
     float beam_width = 0.2f;
     GLuint vertex_count = 0;
-    
-    // Create beams connecting consecutive workspaces
     for (size_t i = 0; i < active_centers.size() - 1; i++) {
         glm::vec3 start = glm::vec3(active_centers[i].x, active_centers[i].y, active_centers[i].z);
         glm::vec3 end = glm::vec3(active_centers[i + 1].x, active_centers[i + 1].y, active_centers[i + 1].z);
-        
-        // Calculate beam direction
         glm::vec3 beam_dir = glm::normalize(end - start);
-        
-        // Calculate camera-facing perpendicular (billboard technique)
         glm::vec3 to_camera = glm::normalize(camera_pos - (start + end) * 0.5f);
         glm::vec3 right = glm::normalize(glm::cross(beam_dir, to_camera)) * beam_width;
-        
-        // Fallback if cross product fails (camera aligned with beam)
         if (glm::length(right) < 0.001f) {
             glm::vec3 arbitrary(0.0f, 1.0f, 0.0f);
-            if (std::abs(glm::dot(beam_dir, arbitrary)) > 0.99f) {
+            if (std::abs(glm::dot(beam_dir, arbitrary)) > 0.99f)
                 arbitrary = glm::vec3(1.0f, 0.0f, 0.0f);
-            }
             right = glm::normalize(glm::cross(beam_dir, arbitrary)) * beam_width;
         }
-        
-        // Create quad vertices (4 corners) - with Y flip
         glm::vec3 v0 = start - right;
         glm::vec3 v1 = start + right;
         glm::vec3 v2 = end - right;
         glm::vec3 v3 = end + right;
-        
-        // Add vertices with Y flip
         vertices.insert(vertices.end(), {v0.x, -v0.y, v0.z});
         vertices.insert(vertices.end(), {v1.x, -v1.y, v1.z});
         vertices.insert(vertices.end(), {v2.x, -v2.y, v2.z});
         vertices.insert(vertices.end(), {v3.x, -v3.y, v3.z});
-        
-        // Distance from center: edges are 1.0, center is 0.0
         distances.insert(distances.end(), {1.0f, 1.0f, 1.0f, 1.0f});
-        
-        // Add center line vertices for the glow core
         vertices.insert(vertices.end(), {start.x, -start.y, start.z});
         vertices.insert(vertices.end(), {end.x, -end.y, end.z});
         distances.insert(distances.end(), {0.0f, 0.0f});
-        
-        // Create triangles for the quad
         indices.push_back(vertex_count + 0);
         indices.push_back(vertex_count + 1);
         indices.push_back(vertex_count + 2);
-        
         indices.push_back(vertex_count + 1);
         indices.push_back(vertex_count + 3);
         indices.push_back(vertex_count + 2);
-        
-        // Center strip triangles for bright core
         indices.push_back(vertex_count + 0);
         indices.push_back(vertex_count + 4);
         indices.push_back(vertex_count + 2);
-        
         indices.push_back(vertex_count + 2);
         indices.push_back(vertex_count + 4);
         indices.push_back(vertex_count + 5);
-        
         indices.push_back(vertex_count + 1);
         indices.push_back(vertex_count + 5);
         indices.push_back(vertex_count + 3);
-        
         indices.push_back(vertex_count + 1);
         indices.push_back(vertex_count + 4);
         indices.push_back(vertex_count + 5);
-        
         vertex_count += 6;
     }
-    
-    if (vertices.empty()) {
-        return;
-    }
-    
-    // Render
+    if (vertices.empty()) return;
     GL_CALL(glEnable(GL_DEPTH_TEST));
     GL_CALL(glDepthFunc(GL_LEQUAL));
     GL_CALL(glEnable(GL_BLEND));
-    GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE)); // Additive blending
-    
+    GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE));
     beam_program.use(wf::TEXTURE_TYPE_RGBA);
     beam_program.uniformMatrix4f("mvp", vp);
-    beam_program.uniform3f("color", 1.0f, 0.95f, 0.3f); // Bright yellow-orange
-    
+    beam_program.uniform3f("color", 1.0f, 0.95f, 0.3f);
     beam_program.attrib_pointer("position", 3, 0, vertices.data());
     beam_program.attrib_pointer("distance", 1, 0, distances.data());
-    
-    GL_CALL(glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), 
+    GL_CALL(glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()),
                           GL_UNSIGNED_INT, indices.data()));
-    
     beam_program.deactivate();
     GL_CALL(glDisable(GL_BLEND));
 }
@@ -2696,109 +2267,70 @@ void render(const wf::scene::render_instruction_t& data,
         GL_CALL(glDepthFunc(GL_LESS));
         GL_CALL(glDepthMask(GL_TRUE));
         GL_CALL(glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT));
-        // RENDER SHADER BACKGROUND FIRST
        if(star_background)
         {render_shader_background(data.target);}
-        // NEW: Render beam overlay after background but before desktops
         auto vp = calculate_vp_matrix(data.target);
         GL_CALL(glClear(GL_DEPTH_BUFFER_BIT));
         render_beam(data, vp);
         GL_CALL(glClear(GL_DEPTH_BUFFER_BIT));
         program.use(wf::TEXTURE_TYPE_RGBA);
         static GLfloat vertexData[] = {
-            -0.5, 0.5,
-            0.5, 0.5,
-            0.5, -0.5,
-            -0.5, -0.5
+            -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5
         };
         static GLfloat coordData[] = {
-            0.0f, 1.0f,
-            1.0f, 1.0f,
-            1.0f, 0.0f,
-            0.0f, 0.0f
+            0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f
         };
         program.attrib_pointer("position", 2, 0, vertexData);
         program.attrib_pointer("uvPosition", 2, 0, coordData);
         program.uniformMatrix4f("VP", vp);
-       
         if (tessellation_support)
         {
             program.uniform1i("deform", use_deform);
             program.uniform1i("light", use_light);
             program.uniform1f("ease", animation.cube_animation.ease_deformation);
-           
             GLint loc = glGetUniformLocation(program.get_program_id(wf::TEXTURE_TYPE_RGBA), "cameraYOffset");
-            if (loc >= 0)
-            {
-                GL_CALL(glUniform1f(loc, camera_y_offset));
-            }
+            if (loc >= 0) GL_CALL(glUniform1f(loc, camera_y_offset));
         }
         GL_CALL(glEnable(GL_CULL_FACE));
         GL_CALL(glEnable(GL_BLEND));
         GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-       
-       
-// RESTORE CUBE PROGRAM STATE
         program.use(wf::TEXTURE_TYPE_RGBA);
         program.attrib_pointer("position", 2, 0, vertexData);
         program.attrib_pointer("uvPosition", 2, 0, coordData);
         program.uniformMatrix4f("VP", vp);
         GL_CALL(glEnable(GL_CULL_FACE));
         GL_CALL(glDepthMask(GL_TRUE));
-       
-        // ============================================
-        // 1. NEW LAYERED DESKTOP BACKGROUND (RECESSED PLATES)
-        // Loop from deepest layer (index 5) to the frontmost layer (index 1)
-        // The layer at index 0 is the main desktop which is drawn with the windows on top.
-        // ============================================
-       
+
         const int NUM_RECESSED_PLATES = 5;
         for (int layer_idx = NUM_RECESSED_PLATES; layer_idx >= 1; --layer_idx)
         {
             float depth_index = (float)layer_idx;
-           
-            // Render BACK FACES for all rows
             for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
             {
                 float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-                // is_window_layer=false: This is still desktop content, but the depth index handles the Z-shift.
                 render_cube(GL_CCW, buffers_rows[row], vp, vertical_offset, 1.0f, false, depth_index);
             }
-            // Render BACK FACES for current row
             render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false, depth_index);
-           
-            // Render FRONT FACES for all rows
             for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
             {
                 float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
                 render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false, depth_index);
             }
-            // Render FRONT FACES for current row
             render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false, depth_index);
         }
-        // ============================================
-        // 2. MAIN DESKTOP PLANE (LAYER 0 - The one the windows float over)
-        // CONTENT: buffers (desktop content)
-        // MATRIX: is_window_layer=false, layer_depth_index=0.0f (z_shift=0.0f, ALL Tilts)
-        // ============================================
-       
-        // BACK FACES
+        // Main desktop plane (layer 0)
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
             render_cube(GL_CCW, buffers_rows[row], vp, vertical_offset, 1.0f, false, 0.0f);
         }
         render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false, 0.0f);
-       
-        // FRONT FACES
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
             render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false, 0.0f);
         }
         render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false, 0.0f);
-       
-        // RESTORE STATE for window popout cubes
         program.use(wf::TEXTURE_TYPE_RGBA);
         program.attrib_pointer("position", 2, 0, vertexData);
         program.attrib_pointer("uvPosition", 2, 0, coordData);
@@ -2806,30 +2338,19 @@ void render(const wf::scene::render_instruction_t& data,
         GL_CALL(glEnable(GL_CULL_FACE));
         GL_CALL(glDepthFunc(GL_LESS));
         GL_CALL(glDepthMask(GL_TRUE));
-       
-        // ============================================
-        // 1. ORIGINAL: RENDER DESKTOP BACKGROUNDS (NEAR/ANGLED)
-        // CONTENT: buffers (desktop content)
-        // MATRIX: is_window_layer=false (z_shift=0.0f, INITIAL_PANE_TILT) -> KEEP AS IS
-        // ============================================
-       
-        // BACK FACES - Desktop backgrounds for all rows
+        // Desktop backgrounds
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-            render_cube(GL_CCW, buffers_rows[row], vp, vertical_offset, 1.0f, false, false); // <--- ADDED 'false'
+            render_cube(GL_CCW, buffers_rows[row], vp, vertical_offset, 1.0f, false, false);
         }
-        render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false, false); // <--- ADDED 'false'
-       
-        // FRONT FACES - Desktop backgrounds for all rows
+        render_cube(GL_CCW, buffers, vp, 0.0f, 1.0f, false, false);
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-            render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false, false); // <--- ADDED 'false'
+            render_cube(GL_CW, buffers_rows[row], vp, vertical_offset, 1.0f, false, false);
         }
-        render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false, false); // <--- ADDED 'false'
-       
-        // RESTORE STATE for window popout cubes
+        render_cube(GL_CW, buffers, vp, 0.0f, 1.0f, false, false);
         program.use(wf::TEXTURE_TYPE_RGBA);
         program.attrib_pointer("position", 2, 0, vertexData);
         program.attrib_pointer("uvPosition", 2, 0, coordData);
@@ -2837,56 +2358,53 @@ void render(const wf::scene::render_instruction_t& data,
         GL_CALL(glEnable(GL_CULL_FACE));
         GL_CALL(glDepthFunc(GL_LESS));
         GL_CALL(glDepthMask(GL_TRUE));
-       
-        // ============================================
-        // 2. ORIGINAL: RENDER WINDOWS (FAR/FLAT)
-        // CONTENT: buffers_windows (window content)
-        // MATRIX: is_window_layer=true (z_shift=0.5f, rotation=I) -> KEEP AS IS
-        // ============================================
-       
-      // if (enable_window_popout)
+        // Windows (popout)
         {
             float scale = popout_scale_animation;
-           
-            // BACK FACES - Windows for all rows
             for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
             {
                 float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-                render_cube(GL_CCW, buffers_windows_rows[row], vp, vertical_offset, scale, true, false); // <--- ADDED 'false'
+                render_cube(GL_CCW, buffers_windows_rows[row], vp, vertical_offset, scale, true, false);
             }
-            render_cube(GL_CCW, buffers_windows, vp, 0.0f, scale, true, false); // <--- ADDED 'false'
-           
-            // FRONT FACES - Windows for all rows
+            render_cube(GL_CCW, buffers_windows, vp, 0.0f, scale, true, false);
             for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
             {
                 float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-                render_cube(GL_CW, buffers_windows_rows[row], vp, vertical_offset, scale, true, false); // <--- ADDED 'false'
+                render_cube(GL_CW, buffers_windows_rows[row], vp, vertical_offset, scale, true, false);
             }
-            render_cube(GL_CW, buffers_windows, vp, 0.0f, scale, true, false); // <--- ADDED 'false'
+            render_cube(GL_CW, buffers_windows, vp, 0.0f, scale, true, false);
         }
-        // ============================================
-        // DEACTIVATE CUBE PROGRAM AND CLEANUP
-        // ============================================
         program.deactivate();
-       
-        // DISABLE DEPTH TEST AND CULL FACE
         GL_CALL(glDisable(GL_CULL_FACE));
         GL_CALL(glDisable(GL_DEPTH_TEST));
-       
-        // ============================================
-        // NOW RENDER CURSOR ON TOP (no depth test!)
-        // ============================================
         render_cursor_indicator(vp);
-       
-        // Final cleanup
         GL_CALL(glDisable(GL_BLEND));
     });
 }
 wf::effect_hook_t pre_hook = [=] ()
 {
+    // When synced, derive camera_y from offset_z progress so all axes
+    // interpolate through the same easing curve at the same rate
+    if (sync_cam_y_to_z && animation.cube_animation.running())
+    {
+        float current_z = animation.cube_animation.offset_z;
+        float z_range = sync_end_z - sync_start_z;
+        float t = (std::abs(z_range) > 1e-6f)
+            ? (current_z - sync_start_z) / z_range
+            : 1.0f;
+        t = glm::clamp(t, 0.0f, 1.0f);
+        float cam_y = sync_start_cam_y + t * (sync_end_cam_y - sync_start_cam_y);
+        camera_y_offset.set(cam_y, cam_y);
+    }
+    else if (sync_cam_y_to_z && !animation.cube_animation.running())
+    {
+        // Animation finished — snap to final value and disable sync
+        camera_y_offset.set(sync_end_cam_y, sync_end_cam_y);
+        sync_cam_y_to_z = false;
+    }
+
     update_view_matrix();
     wf::scene::damage_node(render_node, render_node->get_bounding_box());
-   
     if (animation.cube_animation.running() || camera_y_offset.running() || popout_scale_animation.running())
     {
         output->render->schedule_redraw();
@@ -2899,23 +2417,18 @@ wf::effect_hook_t pre_hook = [=] ()
         [=] (wf::input_event_signal<wlr_pointer_motion_event> *ev)
     {
         pointer_moved(ev->event);
-        ev->event->delta_x = 0;
-        ev->event->delta_y = 0;
-        ev->event->unaccel_dx = 0;
-        ev->event->unaccel_dy = 0;
+        // NOTE: Do NOT zero out delta_x/delta_y/unaccel_dx/unaccel_dy here.
+        // In DRM mode the compositor needs these deltas to move the hardware cursor.
+        // The input grab already prevents the events from reaching client windows.
+        // We use get_cursor_position() for raycasting, so we need the cursor to move.
     };
 void pointer_moved(wlr_pointer_motion_event *ev)
 {
-    if (animation.in_exit)
-    {
-        return;
-    }
+    if (animation.in_exit) return;
     auto cursor = wf::get_core().get_cursor_position();
-    // UPDATE CURSOR INDICATOR AND VIRTUAL HIT ON EVERY MOUSE MOVE
     if (output->is_plugin_active(grab_interface.name))
     {
         Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
-        // Always compute virtual hit on the infinite plane
         if (std::abs(ray.dir.z) > 1e-6f) {
             float t = (plane_z - ray.origin.z) / ray.dir.z;
             if (t > 0.0f) {
@@ -2927,221 +2440,130 @@ void pointer_moved(wlr_pointer_motion_event *ev)
         } else {
             has_virtual_hit = false;
         }
-        // Compute bounded hit for cursor indicator
         HitInfo hit = raycast_to_workspace(ray.origin, ray.dir, output);
         static bool logged_hit = false;
         if (hit.ws.x >= 0)
         {
-            // Update cursor indicator position
             cursor_indicator.active = true;
             cursor_indicator.workspace_x = hit.ws.x;
             cursor_indicator.workspace_y = hit.ws.y;
             cursor_indicator.uv_position = hit.local_uv;
             cursor_indicator.world_position = ray.origin + hit.t * ray.dir;
-            // Sync virtual hit with actual hit when bounded
             virtual_ray_hit_pos = cursor_indicator.world_position;
-            // STORE WHICH WORKSPACE IS AT THE HIT POINT
             hit_workspace_x = hit.ws.x;
             hit_workspace_y = hit.ws.y;
             if (!logged_hit)
             {
-                LOGI("pointer_moved: Hit detected! Setting cursor_indicator.active=true");
-                LOGI(" workspace=(", hit.ws.x, ",", hit.ws.y, ")");
-                LOGI(" UV=(", hit.local_uv.x, ",", hit.local_uv.y, ")");
+                LOGI("pointer_moved: Hit detected at workspace=(", hit.ws.x, ",", hit.ws.y, ")");
                 logged_hit = true;
             }
         }
         else
         {
-            // Not pointing at any workspace face
             cursor_indicator.active = false;
             logged_hit = false;
         }
     } else {
-        // When not active, clear virtual hit
         has_virtual_hit = false;
     }
-    // ============================================================
-    // If dragging a window, move it and check workspace boundaries
-// If dragging a window, move it and check workspace boundaries
 if (is_dragging_window && dragged_view)
 {
-    static wf::pointf_t last_virtual_pos = {0, 0}; // NEW: Track prev virtual for delta
-    // Get the actual mouse cursor position and convert to 3D ray
+    static wf::pointf_t last_virtual_pos = {0, 0};
     Ray ray = screen_to_world_ray(cursor.x, cursor.y, output);
-    // Use window layer depth for accurate window dragging
     HitInfo hit = raycast_at_window_depth(ray.origin, ray.dir, output);
     if (hit.ws.x >= 0)
     {
-        // Compute virtual cursor position - add workspace offset to get absolute position
         auto bbox = output->get_layout_geometry();
-       
-        // Apply perspective correction since we're at window depth (NEW: Less aggressive for Y)
         float window_offset = get_window_z_offset();
-        float perspective_scale_x = plane_z / (plane_z + window_offset); // Keep for X
-        float perspective_scale_y = 1.0f; // NEW: No scale for Y (direct UV) to boost sensitivity
+        float perspective_scale_x = plane_z / (plane_z + window_offset);
+        float perspective_scale_y = 1.0f;
         float centered_uv_x = hit.local_uv.x - 0.5f;
         float centered_uv_y = hit.local_uv.y - 0.5f;
         float corrected_uv_x = (centered_uv_x * perspective_scale_x) + 0.5f;
-        float corrected_uv_y = (centered_uv_y * perspective_scale_y) + 0.5f; // Direct UV for Y
-       
+        float corrected_uv_y = (centered_uv_y * perspective_scale_y) + 0.5f;
         float virtual_x = (hit.ws.x + corrected_uv_x) * static_cast<float>(bbox.width);
-        float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height); // Flip Y for screen-down
-       
-        // NEW: Hybrid for intra-row Y: If same row, add direct mouse delta (smooth fallback)
+        float virtual_y = (hit.ws.y + (1.0f - corrected_uv_y)) * static_cast<float>(bbox.height);
         float delta_y = cursor.y - last_cursor_pos.y;
-        if (hit.row_offset == 0) { // Same row: Boost with raw delta
-            virtual_y += delta_y * 0.8f; // 80% mouse sensitivity (tune 0.8f)
-            LOGI("INTRA-ROW Y BOOST: delta_y=", delta_y, " virtual_y=", virtual_y);
+        if (hit.row_offset == 0) {
+            virtual_y += delta_y * 0.8f;
         }
-       
-        // FIXED: Update wobbly effect with dragged_view and VIRTUAL position
         move_wobbly(dragged_view, virtual_x, virtual_y);
-       
-        // Position the window so that the drag_offset point stays under the cursor
         wf::geometry_t new_geom = dragged_view->get_geometry();
         new_geom.x = virtual_x - drag_offset.x;
         new_geom.y = virtual_y - drag_offset.y;
-       
-        // CRITICAL: Just set the geometry, DON'T move to new workspace during drag
         dragged_view->set_geometry(new_geom);
-       
-        // DEBUG: Log changes (add UV delta for sensitivity check)
-        static float last_uv_y = 0.5f;
-        float uv_delta_y = hit.local_uv.y - last_uv_y;
-        LOGI("DRAG: Mouse delta_y=", (cursor.y - last_cursor_pos.y), " UV_y=", hit.local_uv.y, " UV_delta_y=", uv_delta_y,
-             " virtual_y=", virtual_y, " ws_y=", hit.ws.y);
-        last_uv_y = hit.local_uv.y;
         last_virtual_pos = {virtual_x, virtual_y};
-       
-        // Damage workspace nodes to trigger re-rendering
         if (render_node)
         {
             auto cube_node = std::dynamic_pointer_cast<cube_render_node_t>(render_node);
-            if (cube_node)
-            {
-                cube_node->damage_all_workspace_windows();
-            }
+            if (cube_node) cube_node->damage_all_workspace_windows();
         }
     }
     last_cursor_pos = cursor;
     output->render->schedule_redraw();
-    return; // Don't rotate camera
+    return;
 }
     last_cursor_pos = cursor;
     output->render->schedule_redraw();
 }
 void render_cursor_indicator(const glm::mat4& vp)
 {
-    if (!cursor_indicator.active)
-    {
-        return;
-    }
-   
-    // CHECK IF CURSOR PROGRAM IS INITIALIZED
-    if (cursor_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0)
-    {
-        return;
-    }
-   
-    if (cursor_vbo == 0)
-    {
-        return;
-    }
-   
-    // Update timestamp for animation
+    if (!cursor_indicator.active) return;
+    if (cursor_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0) return;
+    if (cursor_vbo == 0) return;
     static auto start_time = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     cursor_indicator.timestamp = std::chrono::duration<float>(now - start_time).count();
-   
-    // Calculate the model matrix for the workspace where cursor is pointing
     auto cws = output->wset()->get_current_workspace();
     auto grid = output->wset()->get_workspace_grid_size();
-   
     int face_index = cursor_indicator.workspace_x;
     int row_offset = cursor_indicator.workspace_y - cws.y;
     float v_offset = -static_cast<float>(row_offset) * CUBE_VERTICAL_SPACING;
-   
     auto model = calculate_model_matrix(face_index, v_offset, 1.0f, false);
-   
-    // Transform UV to local position on the quad (-0.5 to 0.5)
     float local_x = cursor_indicator.uv_position.x - 0.5f;
-    float local_y = -(cursor_indicator.uv_position.y - 0.5f); // Flip Y
-   
-    // Create cursor model matrix
+    float local_y = -(cursor_indicator.uv_position.y - 0.5f);
     glm::mat4 cursor_model = model;
-    cursor_model = glm::translate(cursor_model, glm::vec3(local_x, local_y, 0.9f)); // Moved closer (was 0.01f)
-    cursor_model = glm::scale(cursor_model, glm::vec3(0.3f, 0.3f, 1.0f)); // MUCH BIGGER (was 0.05f)
-   
+    cursor_model = glm::translate(cursor_model, glm::vec3(local_x, local_y, 0.9f));
+    cursor_model = glm::scale(cursor_model, glm::vec3(0.3f, 0.3f, 1.0f));
     glm::mat4 mvp = vp * cursor_model;
-   
-    // Render cursor
     GL_CALL(glEnable(GL_BLEND));
     GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-    GL_CALL(glDisable(GL_DEPTH_TEST)); // Always on top
-   
+    GL_CALL(glDisable(GL_DEPTH_TEST));
     cursor_program.use(wf::TEXTURE_TYPE_RGBA);
     cursor_program.uniformMatrix4f("mvp", mvp);
     cursor_program.uniform1f("u_time", cursor_indicator.timestamp);
-    cursor_program.uniform3f("u_color", 1.0f, 0.0f, 0.0f); // BRIGHT RED (was cyan 0.2, 1.0, 0.8)
-   
+    cursor_program.uniform3f("u_color", 1.0f, 0.0f, 0.0f);
     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cursor_vbo));
     cursor_program.attrib_pointer("position", 2, 0, nullptr);
-   
-    GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, 34)); // 1 center + 33 points
-   
+    GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, 34));
     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
     cursor_program.deactivate();
-   
     GL_CALL(glEnable(GL_DEPTH_TEST));
 }
 void pointer_scrolled(double amount)
 {
     LOGI("pointer_scrolled called: amount=", amount, " in_exit=", animation.in_exit);
-   
-    if (animation.in_exit)
-    {
-        return;
-    }
+    if (animation.in_exit) return;
     animation.cube_animation.ease_deformation.restart_with_end(
         animation.cube_animation.ease_deformation.end);
-    float target_zoom = animation.cube_animation.zoom;
-    float start_zoom = target_zoom;
-   
-    LOGI(" Current zoom: start_zoom=", start_zoom);
-    target_zoom +=
-        std::min(std::pow(target_zoom, 1.5f), ZOOM_MAX) * amount * ZVelocity;
-    target_zoom = std::min(std::max(target_zoom, ZOOM_MIN), ZOOM_MAX);
-    animation.cube_animation.zoom.set(start_zoom, target_zoom);
-    // Get grid info
-    auto ws_set = output->wset();
-    auto grid = ws_set->get_workspace_grid_size();
-   
-    // Calculate actual grid dimensions in world space
-    float grid_width = (grid.width - 1) * CUBE_SPACING;
-    float grid_height = (grid.height - 1) * CUBE_SPACING;
-   
-    // Calculate required Z distance to see full grid
-    float fov = glm::radians(45.0f);
-    auto output_geometry = output->get_layout_geometry();
-    float aspect = (float)output_geometry.width / output_geometry.height;
-   
-    float required_z_for_height = grid_height / (2.0f * std::tan(fov / 2.0f));
-    float required_z_for_width = grid_width / (2.0f * aspect * std::tan(fov / 2.0f));
-    float required_z = std::max(required_z_for_height, required_z_for_width) * CUBE_SPACING;
-   
-    // Interpolate Z based on zoom
-    float zoom_factor = std::min(target_zoom, 1.0f);
-    float base_z = identity_z_offset + Z_OFFSET_NEAR;
-    float target_offset_z = required_z * (1.0f - zoom_factor) + base_z * zoom_factor;
-   
-    // DON'T change tilt during scroll zoom - keep it at 180° while in cube mode
-    // Tilt only interpolates during exit animation (reset_attribs)
-   
+
+    // Scroll controls offset_z directly (zoom stays at 1.0)
+    // Scroll up (negative amount) = zoom in = decrease offset_z
+    // Scroll down (positive amount) = zoom out = increase offset_z
+    float current_z = animation.cube_animation.offset_z.end;
+    float close_z = identity_z_offset + Z_OFFSET_NEAR;
+    float far_z = calculate_overview_z() * 2.0f; // Allow zooming out beyond overview
+
+    // Scale scroll speed based on current distance
+    float scroll_speed = current_z * 0.15f * ZVelocity;
+    float target_z = current_z + amount * scroll_speed;
+
+    // Clamp to reasonable range
+    target_z = std::max(close_z, std::min(target_z, far_z));
+
     animation.cube_animation.offset_y.restart_with_end(0);
-    animation.cube_animation.offset_z.restart_with_end(target_offset_z);
+    animation.cube_animation.offset_z.restart_with_end(target_z);
     animation.cube_animation.rotation.restart_with_end(animation.cube_animation.rotation.end);
-    // Don't touch max_tilt here - it stays at 180° during cube view
     animation.cube_animation.start();
     output->render->schedule_redraw();
 }
@@ -3156,19 +2578,17 @@ void pointer_scrolled(double amount)
             GL_CALL(glDeleteBuffers(1, &cursor_vbo));
         }
         cursor_program.free_resources();
-        beam_program.free_resources(); // NEW
+        beam_program.free_resources();
         wf::gles::run_in_context_if_gles([&]
         {
            program.free_resources();
 window_program.free_resources();
             cap_program.free_resources();
             background_program.free_resources();
-           
             if (background_vbo)
             {
                 GL_CALL(glDeleteBuffers(1, &background_vbo));
             }
-           
             if (top_cap_texture_id)
             {
                 GL_CALL(glDeleteTextures(1, &top_cap_texture_id));
@@ -3177,7 +2597,6 @@ window_program.free_resources();
             {
                 GL_CALL(glDeleteTextures(1, &bottom_cap_texture_id));
             }
-               
             top_cap_buffer.free();
             bottom_cap_buffer.free();
         });
